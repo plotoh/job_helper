@@ -1,0 +1,23 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+      POSTGRES_DB: hhparser
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"   # открываем порт наружу, если нужно подключаться с хоста
+
+  app:
+    build: .
+    environment:
+      DB_DSN: postgresql+asyncpg://user:pass@postgres/hhparser
+    depends_on:
+      - postgres
+    # Запускаем приложение один раз и завершаем работу
+    command: python -m app.main
+
+volumes:
+  pgdata:
