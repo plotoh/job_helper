@@ -16,7 +16,7 @@ def _parse_experience(exp_text: str) -> Optional[Tuple[int, int]]:
         return (0, 0)
     numbers = re.findall(r'\d+', text)
     if len(numbers) == 2:
-        return (int(numbers[0]), int(numbers[1]))
+        return int(numbers[0]), int(numbers[1])
     elif len(numbers) == 1:
         num = int(numbers[0])
         return (num, num)

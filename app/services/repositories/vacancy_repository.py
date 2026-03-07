@@ -1,7 +1,7 @@
 import json
-from sqlalchemy import insert
+from sqlalchemy import insert, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.db.models import Vacancy
+from app.db.models import Vacancy, AccountVacancy
 from app.services.interfaces import IVacancyRepository
 
 
@@ -23,3 +23,17 @@ class VacancyRepository(IVacancyRepository):
         result = await self.session.execute(stmt)
         await self.session.commit()
         return result.rowcount > 0
+
+    async def mark_responded(self, account_id: int, hh_id: str, status: str = "success"):
+        stmt = insert(AccountVacancy).values(
+            account_id=account_id,
+            hh_id=hh_id,
+            responded=True,
+            response_status=status,
+            response_date=func.now()
+        ).on_conflict_do_update(
+            index_elements=['account_id', 'hh_id'],
+            set_={'responded': True, 'response_status': status, 'response_date': func.now()}
+        )
+        await self.session.execute(stmt)
+        await self.session.commit()

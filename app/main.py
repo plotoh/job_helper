@@ -4,12 +4,15 @@ from typing import List
 
 from app.config import settings
 from app.db.database import AsyncSessionLocal, init_db
-from app.services.browser_manager import BrowserManager
-from app.services.cookie_loader import load_cookies_from_netscape
-from app.services.hh_list_parser import HHVacancyListParser
-from app.services.hh_detail_parser import HHVacancyDetailParser
-from app.services.filter import VacancyFilter
-from app.services.vacancy_repository import VacancyRepository
+from app.services import (
+    HHVacancyListParser,
+    HHVacancyDetailParser,
+    VacancyFilter,
+    VacancyRepository,
+    BrowserManager,
+    load_cookies_from_netscape,
+    generate_message
+)
 
 logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL))
 logger = logging.getLogger(__name__)

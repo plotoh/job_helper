@@ -25,3 +25,16 @@ class IVacancyRepository(ABC):
     @abstractmethod
     async def save_if_not_exists(self, vacancy: dict) -> bool:
         pass
+
+
+class IResponseService(ABC):
+    @abstractmethod
+    async def respond_to_vacancy(
+            self,
+            vacancy_url: str,
+            resume_id: str,
+            message: str,
+            context: BrowserContext
+    ) -> bool:
+        """Откликнуться на вакансию. Возвращает True при успехе."""
+        pass

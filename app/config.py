@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     HH_COOKIES_FILE: str = "cookies.txt"
 
-    MESSAGE_TEMPLATE_FILE: str = "message_template.txt"
+    MESSAGE_TEMPLATE_FILE: str = "app/message_template.txt"
 
     # Playwright
     PLAYWRIGHT_HEADLESS: bool = True
