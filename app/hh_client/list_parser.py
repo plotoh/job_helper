@@ -2,7 +2,7 @@ import asyncio
 import logging
 from typing import List, Dict
 from playwright.async_api import BrowserContext
-from app.services.interfaces import IVacancyListParser
+from app.hh_client.interfaces import IVacancyListParser
 
 logger = logging.getLogger(__name__)
 

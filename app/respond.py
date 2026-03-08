@@ -1,17 +1,16 @@
+
 import asyncio
 import logging
 from pathlib import Path
-
 from sqlalchemy import select
 
 from app.config import settings
-from app.db.database import AsyncSessionLocal
-from app.db.models import Vacancy, AccountVacancy
-from app.services import (
+from app.db import AsyncSessionLocal, Vacancy, AccountVacancy, VacancyRepository
+
+from app.hh_client import (
     BrowserManager,
     generate_message,
     HHResponseService,
-    VacancyRepository
 )
 
 logging.basicConfig(level=logging.INFO)

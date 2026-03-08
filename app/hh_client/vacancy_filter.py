@@ -1,5 +1,5 @@
 import re
-from app.services.interfaces import IVacancyFilter
+from app.hh_client.interfaces import IVacancyFilter
 
 
 class VacancyFilter(IVacancyFilter):

@@ -3,7 +3,7 @@ import logging
 import re
 from typing import Dict, Any, Optional, Tuple
 from playwright.async_api import BrowserContext
-from app.services.interfaces import IVacancyDetailParser
+from app.hh_client.interfaces import IVacancyDetailParser
 
 logger = logging.getLogger(__name__)
 
@@ -13,13 +13,13 @@ def _parse_experience(exp_text: str) -> Optional[Tuple[int, int]]:
         return None
     text = exp_text.lower().strip()
     if "нет опыта" in text or "без опыта" in text:
-        return (0, 0)
+        return 0, 0
     numbers = re.findall(r'\d+', text)
     if len(numbers) == 2:
         return int(numbers[0]), int(numbers[1])
     elif len(numbers) == 1:
         num = int(numbers[0])
-        return (num, num)
+        return num, num
     return None
 
 

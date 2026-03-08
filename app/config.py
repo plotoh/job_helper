@@ -4,6 +4,12 @@ from pydantic import PostgresDsn, computed_field
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False
+    )
+
     # База данных (оставляем, если нужна для других целей)
     DB_HOST: str = "localhost"
     DB_PORT: int = 5432
@@ -18,13 +24,27 @@ class Settings(BaseSettings):
     MAX_CONCURRENT: int = 5
 
     # Cookies и шаблон
-    HH_COOKIES_FILE: str = "cookies.txt"
+    HH_COOKIES_FILE: str = "../cookies/cookies.txt"
     MESSAGE_TEMPLATE_FILE: str = "app/message_template.txt"
     RESUME_ID: str = ""
-    TG_USERNAME: str = ''
+    TG_USERNAME: str = 'test_tg_username'
+    PARSING_COOKIES_FILE: str = "cookies/parsing.txt"
+    COOKIES_DIR: str = "cookies"
 
     # Playwright
     PLAYWRIGHT_HEADLESS: bool = True
+
+    # Параметры рабочего дня и пауз
+    WORK_START_HOUR: int = 10
+    WORK_START_MINUTE: int = 0
+    WORK_END_HOUR: int = 18
+    WORK_END_MINUTE: int = 0
+    PAUSE_COUNT: int = 3
+    PAUSE_MIN_MINUTES: int = 30
+    PAUSE_MAX_MINUTES: int = 60
+    MIN_GAP_MINUTES: int = 10
+    DAILY_LIMIT_MIN: int = 53
+    DAILY_LIMIT_MAX: int = 137
 
     # Логирование
     LOG_LEVEL: str = "INFO"
@@ -43,11 +63,6 @@ class Settings(BaseSettings):
             path=self.DB_NAME,
         )
 
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=False
-    )
 
 
 settings = Settings()

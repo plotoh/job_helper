@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from playwright.async_api import BrowserContext, TimeoutError as PlaywrightTimeoutError
-from app.services.interfaces import IResponseService
+from app.hh_client.interfaces import IResponseService
 
 logger = logging.getLogger(__name__)
 
