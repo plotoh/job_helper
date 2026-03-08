@@ -1,18 +1,15 @@
 from typing import Optional
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import PostgresDsn, field_validator, computed_field
-import os
+from pydantic import PostgresDsn, computed_field
 
 
 class Settings(BaseSettings):
-    # База данных
+    # База данных (оставляем, если нужна для других целей)
     DB_HOST: str = "localhost"
     DB_PORT: int = 5432
     DB_NAME: str = "hhparser"
     DB_USER: str = "user"
     DB_PASSWORD: str = "pass"
-
     DB_DSN: Optional[PostgresDsn] = None
 
     # Параметры парсинга
@@ -20,9 +17,11 @@ class Settings(BaseSettings):
     MAX_PAGES: int = 2
     MAX_CONCURRENT: int = 5
 
+    # Cookies и шаблон
     HH_COOKIES_FILE: str = "cookies.txt"
-
     MESSAGE_TEMPLATE_FILE: str = "app/message_template.txt"
+    RESUME_ID: str = ""
+    TG_USERNAME: str = ''
 
     # Playwright
     PLAYWRIGHT_HEADLESS: bool = True
@@ -35,7 +34,6 @@ class Settings(BaseSettings):
     def database_dsn(self) -> PostgresDsn:
         if self.DB_DSN:
             return self.DB_DSN
-        # Строим DSN из компонентов
         return PostgresDsn.build(
             scheme="postgresql+asyncpg",
             username=self.DB_USER,

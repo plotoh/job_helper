@@ -92,18 +92,19 @@ class HHResponseService(IResponseService):
             logger.info("🖱️ Нажимаем кнопку отправки")
             await submit_button.first.click()
 
-            # Ждём подтверждения отправки
-            try:
-                await page.wait_for_selector('div[data-qa="vacancy-response-success"]',
-                                             state="visible", timeout=10000)
-                logger.info(f"🎉 Отклик на {vacancy_url} отправлен успешно")
-                return True
-            except PlaywrightTimeoutError:
-                logger.error("❌ Не дождались подтверждения отправки")
-                return False
+            message_field_selector = 'textarea[name="text"]'
+            submit_button_selector = 'button[data-qa="vacancy-response-letter-submit"]'
 
+            await asyncio.sleep(1)
+
+            if await page.locator(message_field_selector).count() == 0 and \
+                    await page.locator(submit_button_selector).count() == 0:
+                logger.info("🎉 Форма отправки исчезла – отклик успешно отправлен (без явного подтверждения)")
+                return True
+            else:
+                logger.error("❌ Не дождались подтверждения и форма всё ещё на месте")
+                return False
+            
         except Exception as e:
             logger.error(f"💥 Ошибка при отклике на {vacancy_url}: {e}")
             return False
-        finally:
-            await page.close()
