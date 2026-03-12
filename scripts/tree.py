@@ -62,6 +62,8 @@ IGNORE_LIST = {
     "debug_*.py",
     "debug_*.html",
     "*_debug.py",
+    "scripts/",
+    "cookies/"
     "scripts/debug_*",
     "scripts/*.dump",
     "scripts/*.json",

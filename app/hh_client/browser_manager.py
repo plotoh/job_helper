@@ -34,6 +34,19 @@ class BrowserManager:
         )
         logger.info("Browser started")
 
+    # async def create_context(self, cookies_source: Optional[Union[str, List[dict]]] = None) -> BrowserContext:
+    #     if not self.browser:
+    #         raise RuntimeError("Browser not started. Call start() first.")
+    #     context_options = {}
+    #     if settings.PROXY_SERVER:
+    #         proxy = {
+    #             "server": settings.PROXY_SERVER,
+    #         }
+    #         if settings.PROXY_USERNAME and settings.PROXY_PASSWORD:
+    #             proxy["username"] = settings.PROXY_USERNAME
+    #             proxy["password"] = settings.PROXY_PASSWORD
+    #         context_options["proxy"] = proxy
+    #     context = await self.browser.new_context(**context_options)
     async def create_context(self, cookies_source: Optional[Union[str, List[dict]]] = None) -> BrowserContext:
         """
         Создаёт новый контекст (изолированное окружение) и загружает в него куки.

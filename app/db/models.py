@@ -1,6 +1,7 @@
 # app/db/models.py
 
-from sqlalchemy import Column, String, Integer, Boolean, DateTime, ForeignKey, JSON, Date, Enum, UniqueConstraint
+from sqlalchemy import Column, String, Integer, Boolean, DateTime, ForeignKey, JSON, Date, Enum, UniqueConstraint, \
+    BigInteger
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.sql import func
 import json
@@ -26,10 +27,8 @@ class Vacancy(Base):
 class Account(Base):
     __tablename__ = 'accounts'
 
-    id = Column(Integer, primary_key=True) ## tg_id
+    id = Column(BigInteger, primary_key=True) ## tg_id
     tg_username = Column(String, unique=True, nullable=True)
-    # hh_username = Column(String, nullable=True)
-    # hh_password_encrypted = Column(String, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     resume_id = Column(String, nullable=False)
 
@@ -37,7 +36,7 @@ class Account(Base):
 class AccountVacancy(Base):
     __tablename__ = 'account_vacancy'
 
-    account_id = Column(Integer, ForeignKey('accounts.id'), primary_key=True)
+    account_id = Column(BigInteger, ForeignKey('accounts.id'), primary_key=True)
     hh_id = Column(String, ForeignKey('vacancies.hh_id'), primary_key=True)
     responded = Column(Boolean, default=False)
     response_status = Column(String, nullable=True)
@@ -50,7 +49,7 @@ class ResponseError(Base):
     __tablename__ = 'response_errors'
 
     id = Column(Integer, primary_key=True)
-    account_id = Column(Integer, ForeignKey('accounts.id'), nullable=False)
+    account_id = Column(BigInteger, ForeignKey('accounts.id'), nullable=False)
     vacancy_id = Column(String, ForeignKey('vacancies.hh_id'), nullable=False)
     error_text = Column(String, nullable=False)
     error_type = Column(String, nullable=True)  # можно хранить тип: 'network', 'auth', 'response_failed' и т.п.
@@ -62,7 +61,7 @@ class AccountDailyState(Base):
     __tablename__ = 'account_daily_state'
 
     id = Column(Integer, primary_key=True)
-    account_id = Column(Integer, ForeignKey('accounts.id'), nullable=False)
+    account_id = Column(BigInteger, ForeignKey('accounts.id'), nullable=False)
     date = Column(Date, nullable=False)  # день, к которому относится состояние
     daily_limit = Column(Integer, nullable=False)  # сколько нужно сделать сегодня
     done_count = Column(Integer, default=0)  # сколько уже сделано
@@ -90,3 +89,34 @@ class ParsingLog(Base):
     vacancies_found = Column(Integer, default=0)
     status = Column(String, nullable=False)  # success, failed
     error = Column(String, nullable=True)
+
+
+class ParsingProgress(Base):
+    __tablename__ = 'parsing_progress'
+    id = Column(Integer, primary_key=True)
+    search_url = Column(String, nullable=False, unique=True)  # или хеш, но для простоты сам URL
+    last_page = Column(Integer, default=0)  # номер последней успешно обработанной страницы (0 – ещё не начинали)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class FilteredOutVacancy(Base):
+    __tablename__ = 'filtered_out_vacancies'
+    hh_id = Column(String, primary_key=True)
+    title = Column(String, nullable=False)
+    url = Column(String, nullable=False)
+    filter_reason = Column(String, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class JuniorVacancy(Base):
+    __tablename__ = 'junior_vacancies'
+
+    hh_id = Column(String, primary_key=True)
+    title = Column(String, nullable=False)
+    url = Column(String, nullable=False)
+    salary_text = Column(String, nullable=True)
+    experience_min = Column(Integer, nullable=True)
+    experience_max = Column(Integer, nullable=True)
+    work_format = Column(String, nullable=True)
+    skills = Column(JSON, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())

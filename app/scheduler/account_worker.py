@@ -10,10 +10,12 @@ from playwright.async_api import BrowserContext
 from app.config import settings
 from app.db import AsyncSessionLocal
 from app.db import AccountStateRepository, VacancyRepository, ResponseErrorRepository
-from app.hh_client import HHResponseService, generate_message
+from app.hh_client.hh_response import HHResponseService
+from app.hh_client.message_generator import generate_message
+from app.scheduler.daily_planner import generate_pauses, generate_daily_limit
+from app.utils.time_utils import msk_now, MSK_TZ
 
 logger = logging.getLogger(__name__)
-
 
 WORK_START = time(settings.WORK_START_HOUR, settings.WORK_START_MINUTE)
 WORK_END = time(settings.WORK_END_HOUR, settings.WORK_END_MINUTE)
@@ -27,6 +29,7 @@ class AccountWorker:
         self.template = template
         self.response_service = HHResponseService()
         self.stop_event = asyncio.Event()
+        self.vacancy_attempts = {}  # {vacancy_id: attempts}
 
     async def run(self):
         """Основной цикл воркера."""
@@ -34,39 +37,48 @@ class AccountWorker:
 
         while not self.stop_event.is_set():
             # Получаем сегодняшнюю дату
-            today = datetime.now().date()
+            today = msk_now().date()
 
             # Создаём сессию БД (каждую итерацию, чтобы избежать проблем с устаревшими объектами)
             async with AsyncSessionLocal() as session:
                 state_repo = AccountStateRepository(session)
                 state = await state_repo.get_for_today(self.account_id, today)
 
-                # Если нет состояния на сегодня — ждём, пока daily_planner создаст (или создадим сами)
                 if not state:
-                    logger.info(f"No daily state for account {self.account_id} today, waiting...")
-                    # Ждём минуту и проверяем снова
-                    await asyncio.sleep(60)
+                    logger.info(f"No daily state for account {self.account_id} today, generating now.")
+                    limit = generate_daily_limit()
+                    pauses = generate_pauses()
+                    data = {
+                        'daily_limit': limit,
+                        'pauses': pauses,
+                        'done_count': 0,
+                        'status': 'active'  # сразу активен, чтобы начать работу
+                    }
+                    state = await state_repo.create_or_update(self.account_id, today, data)
+                    # Переходим к следующей итерации цикла, чтобы применить новое состояние
                     continue
 
                 # Проверяем, рабочий ли сейчас день
-                now = datetime.now()
+                now = msk_now()
                 current_time = now.time()
 
                 # Если ещё не началось рабочее время
                 if current_time < WORK_START:
-                    sleep_seconds = (datetime.combine(now.date(), WORK_START) - now).total_seconds()
+                    sleep_seconds = (
+                                datetime.combine(now.date(), WORK_START).replace(tzinfo=MSK_TZ) - now).total_seconds()
                     logger.info(f"Account {self.account_id}: before work hours, sleeping {sleep_seconds:.0f}s")
                     await asyncio.sleep(sleep_seconds)
                     continue
 
                 # Если рабочий день закончился
+                logger.info(f"DEBUG: current_time={current_time}, WORK_END={WORK_END}, state.status={state.status}")
                 if current_time >= WORK_END or state.status == 'completed':
                     if state.status != 'completed':
                         await state_repo.mark_completed(self.account_id, today)
                     logger.info(f"Account {self.account_id}: work day ended or completed. Sleeping until tomorrow.")
                     # Спим до следующего рабочего дня (10:00 следующего дня)
                     tomorrow = now.date() + timedelta(days=1)
-                    next_start = datetime.combine(tomorrow, WORK_START)
+                    next_start = datetime.combine(tomorrow, WORK_START).replace(tzinfo=MSK_TZ)
                     sleep_seconds = (next_start - now).total_seconds()
                     await asyncio.sleep(sleep_seconds)
                     continue
@@ -82,7 +94,8 @@ class AccountWorker:
                 in_pause, pause_end = self._check_pause(current_time, pauses)
                 if in_pause:
                     # Спим до конца паузы
-                    sleep_seconds = (datetime.combine(now.date(), pause_end) - now).total_seconds()
+                    sleep_seconds: float = (
+                                datetime.combine(now.date(), pause_end).replace(tzinfo=MSK_TZ) - now).total_seconds()
                     logger.info(f"Account {self.account_id}: in pause until {pause_end}, sleeping {sleep_seconds:.0f}s")
                     await state_repo.update_status(self.account_id, today, 'paused',
                                                    pause_until=now + timedelta(seconds=sleep_seconds))
@@ -95,10 +108,10 @@ class AccountWorker:
                 max_sleep = None
                 if next_pause_start:
                     # Время до следующей паузы
-                    next_start_dt = datetime.combine(now.date(), next_pause_start)
-                    seconds_to_pause = (next_start_dt - now).total_seconds()
+                    next_start_dt = datetime.combine(now.date(), next_pause_start).replace(tzinfo=MSK_TZ)
+                    seconds_to_pause: float = (next_start_dt - now).total_seconds()
                     # Нельзя спать дольше, чем до начала паузы минус небольшой запас (1 мин)
-                    max_sleep = max(0, seconds_to_pause - 60)  # запас 1 минута, чтобы успеть проснуться до паузы
+                    max_sleep = max(0.0, seconds_to_pause - 60)  # запас 1 минута, чтобы успеть проснуться до паузы
 
                 # Выбираем интервал ожидания
                 min_interval = 60  # 1 минута в секундах
@@ -157,27 +170,32 @@ class AccountWorker:
 
         # Выполняем отклик
         try:
-            success = await self.response_service.respond_to_vacancy(
-                vacancy.url,
-                self.resume_id,  # используем свой resume_id
-                message,
-                self.context
-            )
+            success = await self.response_service.respond_to_vacancy(vacancy.url, self.resume_id, message, self.context)
         except Exception as e:
             logger.exception(f"Account {self.account_id}: exception during response")
             await error_repo.add(self.account_id, vacancy.hh_id, str(e), error_type='exception')
+            # Увеличиваем счётчик попыток
+            attempts = self.vacancy_attempts.get(vacancy.hh_id, 0) + 1
+            self.vacancy_attempts[vacancy.hh_id] = attempts
+            if attempts >= 3:
+                logger.warning(f"Account {self.account_id}: vacancy {vacancy.hh_id} failed 3 times, marking as failed.")
+                await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status="failed")
             return
 
         if success:
-            # Увеличиваем счётчик
             new_done = await state_repo.increment_done(self.account_id, today)
             logger.info(f"Account {self.account_id}: responded to {vacancy.hh_id}, done {new_done}/{state.daily_limit}")
             await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status="success")
+            # Сбрасываем счётчик попыток при успехе
+            self.vacancy_attempts.pop(vacancy.hh_id, None)
         else:
-            # Неудача
             await error_repo.add(self.account_id, vacancy.hh_id, "Response returned False",
                                  error_type='response_failed')
-            # Не увеличиваем счётчик
+            attempts = self.vacancy_attempts.get(vacancy.hh_id, 0) + 1
+            self.vacancy_attempts[vacancy.hh_id] = attempts
+            if attempts >= 3:
+                logger.warning(f"Account {self.account_id}: vacancy {vacancy.hh_id} failed 3 times, marking as failed.")
+                await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status="failed")
 
     async def stop(self):
         """Останавливает воркер."""

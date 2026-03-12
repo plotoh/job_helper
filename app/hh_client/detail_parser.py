@@ -62,7 +62,8 @@ class HHVacancyDetailParser(IVacancyDetailParser):
             exp_elem = page.locator('[data-qa="vacancy-experience"]')
             if await exp_elem.count() > 0:
                 exp_text = await exp_elem.text_content()
-                details["experience"] = _parse_experience(exp_text)
+                details["experience"] = _parse_experience(exp_text)  # может вернуть None или кортеж
+            # иначе остаётся None
 
             # Формат работы
             format_elem = page.locator('[data-qa="vacancy-employment-mode"]')
@@ -79,7 +80,7 @@ class HHVacancyDetailParser(IVacancyDetailParser):
                         details["work_format"] = text.strip()
                         break
 
-            # Навыки
+            # Навыки – всегда список
             skill_list = page.locator('[data-qa="vacancy-skill-list"]')
             if await skill_list.count() > 0:
                 skill_items = skill_list.locator('[data-qa="bloko-tag__text"]')
@@ -98,7 +99,6 @@ class HHVacancyDetailParser(IVacancyDetailParser):
 
         except Exception as e:
             logger.error(f"Ошибка при парсинге {url}: {e}")
-            # Пробрасываем исключение, чтобы выше обработать
             raise
         finally:
             await page.close()

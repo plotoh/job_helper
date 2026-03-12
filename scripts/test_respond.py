@@ -209,11 +209,10 @@ async def test_respond(vacancy_url: str, resume_id: str, message: str, cookies_f
 
 def main():
     parser = argparse.ArgumentParser(description="тестирование отклика")
-    parser.add_argument("--url", required=True, help="вакансия", default="https://hh.ru/vacancy/131029953")
-    parser.add_argument("--resume", help="резюме", default="41bf6a4cff103235840039ed1f44433836306e")
-    parser.add_argument("--message", help="сопроводительное",
-                        default="Здравствуйте! Рассмотрите, пожалуйста, мою кандидатуру")
-    parser.add_argument("--cookies", default="app/cookies.txt")
+    parser.add_argument("--url", required=True, help="вакансия")
+    parser.add_argument("--resume", default="41bf6a4cff103235840039ed1f44433836306e")
+    parser.add_argument("--message", default="Здравствуйте! Рассмотрите, пожалуйста, мою кандидатуру")
+    parser.add_argument("--cookies", default="cookies/peyego1one.txt")
     parser.add_argument("--headless", action="store_true", help="фоновый режим(без GUI)")
 
     args = parser.parse_args()

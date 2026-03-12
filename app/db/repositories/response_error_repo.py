@@ -21,7 +21,8 @@ class ResponseErrorRepository:
         return error
 
     async def count_for_account_last_hour(self, account_id: int, now: datetime) -> int:
-        """Количество ошибок для аккаунта за последний час"""
+        if now.tzinfo is not None:
+            now = now.replace(tzinfo=None)
         one_hour_ago = now - timedelta(hours=1)
         stmt = select(func.count(ResponseError.id)).where(
             and_(

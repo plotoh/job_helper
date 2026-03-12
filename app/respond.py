@@ -6,12 +6,10 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.db import AsyncSessionLocal, Vacancy, AccountVacancy, VacancyRepository
+from app.hh_client.browser_manager import BrowserManager
+from app.hh_client.hh_response import HHResponseService
+from app.hh_client.message_generator import generate_message
 
-from app.hh_client import (
-    BrowserManager,
-    generate_message,
-    HHResponseService,
-)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

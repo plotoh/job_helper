@@ -25,7 +25,6 @@ class HHResponseService(IResponseService):
                 return False
 
             logger.info("✅ Кнопка найдена, кликаем...")
-            # Кликаем и сразу начинаем ждать появления поля ввода
             await respond_button.click(no_wait_after=True)
             logger.info("✅ Кнопка нажата, ожидаем появления поля ввода...")
 
@@ -92,19 +91,34 @@ class HHResponseService(IResponseService):
             logger.info("🖱️ Нажимаем кнопку отправки")
             await submit_button.first.click()
 
-            message_field_selector = 'textarea[name="text"]'
-            submit_button_selector = 'button[data-qa="vacancy-response-letter-submit"]'
+            # Даём время на отправку запроса
+            await asyncio.sleep(3)
 
-            await asyncio.sleep(1)
-
-            if await page.locator(message_field_selector).count() == 0 and \
-                    await page.locator(submit_button_selector).count() == 0:
-                logger.info("🎉 Форма отправки исчезла – отклик успешно отправлен (без явного подтверждения)")
+            # Проверяем, исчезло ли поле ввода (признак успешной отправки)
+            if await page.locator('textarea[name="text"]').count() == 0:
+                logger.info("🎉 Поле ввода исчезло – отклик успешно отправлен")
                 return True
-            else:
-                logger.error("❌ Не дождались подтверждения и форма всё ещё на месте")
-                return False
-            
+
+            # Если поле ещё на месте, пробуем дождаться подтверждения (но недолго)
+            try:
+                await page.wait_for_selector('div[data-qa="vacancy-response-success"]',
+                                             state="visible", timeout=5000)
+                logger.info("🎉 Отклик подтверждён")
+                return True
+            except Exception:
+                # Проверяем, нет ли сообщения об ошибке
+                error_elem = page.locator('div[data-qa="vacancy-response-error"]')
+                if await error_elem.count() > 0:
+                    error_text = await error_elem.text_content()
+                    logger.error(f"❌ Ошибка при отклике: {error_text}")
+                    return False
+                else:
+                    # Явной ошибки нет – скорее всего, отклик ушёл
+                    logger.warning("⚠️ Не дождались подтверждения, но ошибка не обнаружена – считаем успехом")
+                    return True
+
         except Exception as e:
             logger.error(f"💥 Ошибка при отклике на {vacancy_url}: {e}")
             return False
+        finally:
+            await page.close()

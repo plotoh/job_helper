@@ -8,11 +8,12 @@ from .models import (
     AccountVacancy,
     ResponseError,
     AccountDailyState,
-    ParsingLog,
+    ParsingLog, FilteredOutVacancy, JuniorVacancy,
 )
 from app.db.repositories.vacancy_repo import VacancyRepository
 from app.db.repositories.account_state_repo import AccountStateRepository
 from app.db.repositories.response_error_repo import ResponseErrorRepository
+from app.db.repositories.parsing_progress_repo import ParsingProgressRepository
 
 
 __all__ = [
@@ -28,4 +29,7 @@ __all__ = [
     "VacancyRepository",
     "AccountStateRepository",
     "ResponseErrorRepository",
+    "ParsingProgressRepository",
+    "FilteredOutVacancy",
+    "JuniorVacancy",
 ]

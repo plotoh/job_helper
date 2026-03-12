@@ -1,6 +1,6 @@
-from typing import Optional
+from typing import Optional, List
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import PostgresDsn, computed_field
+from pydantic import PostgresDsn, computed_field, Field
 
 
 class Settings(BaseSettings):
@@ -20,8 +20,9 @@ class Settings(BaseSettings):
 
     # Параметры парсинга
     HH_SEARCH_URL: str = "https://hh.ru/search/vacancy?text=Python+Developer&area=1"
-    MAX_PAGES: int = 2
+    MAX_PAGES: int = 2  # not actual
     MAX_CONCURRENT: int = 5
+    PAGES_PER_WINDOW: int = 3
 
     # Cookies и шаблон
     HH_COOKIES_FILE: str = "../cookies/cookies.txt"
@@ -34,10 +35,15 @@ class Settings(BaseSettings):
     # Playwright
     PLAYWRIGHT_HEADLESS: bool = True
 
+    # Telegram bot settings
+    TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_ADMIN_ID: int = 0
+    TELEGRAM_USERS_IDS: str = ""
+
     # Параметры рабочего дня и пауз
     WORK_START_HOUR: int = 10
     WORK_START_MINUTE: int = 0
-    WORK_END_HOUR: int = 18
+    WORK_END_HOUR: int = 23
     WORK_END_MINUTE: int = 0
     PAUSE_COUNT: int = 3
     PAUSE_MIN_MINUTES: int = 30
@@ -45,6 +51,11 @@ class Settings(BaseSettings):
     MIN_GAP_MINUTES: int = 10
     DAILY_LIMIT_MIN: int = 53
     DAILY_LIMIT_MAX: int = 137
+
+    # Прокси (опционально)
+    # PROXY_SERVER: Optional[str] = None  # например "http://proxy.example.com:8080"
+    # PROXY_USERNAME: Optional[str] = None
+    # PROXY_PASSWORD: Optional[str] = None
 
     # Логирование
     LOG_LEVEL: str = "INFO"
@@ -62,7 +73,6 @@ class Settings(BaseSettings):
             port=self.DB_PORT,
             path=self.DB_NAME,
         )
-
 
 
 settings = Settings()

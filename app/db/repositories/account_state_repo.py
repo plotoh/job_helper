@@ -78,7 +78,6 @@ class AccountStateRepository:
         await self.session.execute(stmt)
         await self.session.commit()
 
-
     async def mark_completed(self, account_id: int, today: date):
         """Отметить день как завершённый (достигнут лимит или конец рабочего дня)"""
         stmt = (

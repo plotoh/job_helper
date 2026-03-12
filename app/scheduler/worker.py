@@ -8,12 +8,14 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.db import Account, AsyncSessionLocal, init_db
-from app.hh_client import BrowserManager
+
+from app.hh_client.browser_manager import BrowserManager
 from app.scheduler.account_worker import AccountWorker
 from app.scheduler.parsing_scheduler import ParsingScheduler
-
 from app.scheduler.daily_planner import generate_daily_limit, generate_pauses
+
 from app.db.repositories.account_state_repo import AccountStateRepository
+from app.utils.time_utils import msk_now, MSK_TZ, msk_today
 
 logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL))
 logger = logging.getLogger(__name__)
@@ -76,8 +78,8 @@ class Worker:
 
     async def _daily_planner_loop(self):
         while not self.stop_event.is_set():
-            now = datetime.now()
-            next_run = datetime.combine(now.date() + timedelta(days=1), time(0, 5))
+            now = msk_now()
+            next_run = datetime.combine(msk_today() + timedelta(days=1), time(0, 5)).replace(tzinfo=MSK_TZ)
             sleep_seconds = (next_run - now).total_seconds()
             if sleep_seconds > 0:
                 await asyncio.sleep(sleep_seconds)
@@ -85,7 +87,7 @@ class Worker:
             logger.info("Generating daily limits and pauses for all accounts")
             async with AsyncSessionLocal() as session:
                 accounts = (await session.execute(select(Account))).scalars().all()
-                today = datetime.now().date()
+                today = now.date()
                 state_repo = AccountStateRepository(session)
                 for acc in accounts:
                     # Проверяем, есть ли уже запись на сегодня

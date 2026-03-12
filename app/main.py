@@ -4,16 +4,15 @@ import logging
 from typing import List
 
 from app.config import settings
-from app.db.database import AsyncSessionLocal, init_db
-from app.services import (
-    HHVacancyListParser,
-    HHVacancyDetailParser,
-    VacancyFilter,
-    VacancyRepository,
-    BrowserManager,
-    load_cookies_from_netscape,
-    generate_message
-)
+from app.db import VacancyRepository, AsyncSessionLocal, init_db
+
+from app.hh_client.browser_manager import BrowserManager
+from app.hh_client.cookie_loader import load_cookies_from_netscape
+from app.hh_client.detail_parser import HHVacancyDetailParser
+from app.hh_client.list_parser import HHVacancyListParser
+from app.hh_client.message_generator import generate_message
+from app.hh_client.vacancy_filter import VacancyFilter
+
 
 logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL))
 logger = logging.getLogger(__name__)

@@ -15,18 +15,6 @@ class IVacancyDetailParser(ABC):
         pass
 
 
-class IVacancyFilter(ABC):
-    @abstractmethod
-    def is_match(self, title: str) -> bool:
-        pass
-
-
-class IVacancyRepository(ABC):
-    @abstractmethod
-    async def save_if_not_exists(self, vacancy: dict) -> bool:
-        pass
-
-
 class IResponseService(ABC):
     @abstractmethod
     async def respond_to_vacancy(

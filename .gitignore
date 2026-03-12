@@ -1,34 +1,14 @@
 # Python
 __pycache__/
-*.pyc
 *.py[cod]
 *$py.class
 *.so
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
 
 # Virtual Environment
 .venv/
-env/
 venv/
-ENV/
-env.bak/
-venv.bak/
+env/
 
 # IDE
 .idea/
@@ -36,7 +16,7 @@ venv.bak/
 *.swp
 *.swo
 
-# Environment variables
+# Environment
 .env
 .env.local
 .env.*.local
@@ -48,25 +28,27 @@ venv.bak/
 # Logs
 *.log
 
+# Coverage
 .coverage
 htmlcov/
 
-# --- ДОБАВЛЕНО: Безопасность и отладка ---
+# --- Безопасность ---
 
-# Cookies и чувствительные данные (критично для безопасности)
+# Cookies (только в папке cookies)
+cookies/*.txt
 *cookies*.txt
-*.txt
-!README.txt
-!requirements.txt
 
-# Файлы отладки (HTML дампы, скрипты)
+# Debug files
 scripts/debug_*.html
-*.html
-!templates/*.html
-
-# Временные файлы в scripts
 scripts/debug_*.py
 scripts/*.dump
 scripts/*.json
-/hh_client/not_actual/NOT_ACTUAL_client.py
-old_app
+
+# Old code
+/hh_client/not_actual/
+old_app/
+
+# Build
+build/
+dist/
+*.egg-info/

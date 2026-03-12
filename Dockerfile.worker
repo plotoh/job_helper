@@ -1,6 +1,14 @@
 FROM python:3.11-slim
 
-# Устанавливаем все системные зависимости для Playwright/Chromium
+WORKDIR /app
+
+ENV PIP_TIMEOUT=120 \
+    PIP_RETRIES=5 \
+    PIP_DEFAULT_TIMEOUT=120 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PLAYWRIGHT_HEADLESS=true
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     libnss3 \
@@ -17,17 +25,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrandr2 \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+RUN pip install --no-cache-dir --upgrade pip
 
-# Копируем и устанавливаем Python-зависимости
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Устанавливаем браузер Chromium
 RUN playwright install chromium
 
-# Копируем остальной код
-COPY . .
+COPY app/ ./app/
+COPY cookies/ ./cookies/
+COPY message_template.txt .
+COPY .env .env
 
-# Команда по умолчанию
-CMD ["python", "-m", "app.main"]
+CMD ["python", "-m", "app.scheduler.worker"]
