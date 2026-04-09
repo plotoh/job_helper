@@ -10,6 +10,8 @@ class Settings(BaseSettings):
         case_sensitive=False
     )
 
+    RESPONSES_ENABLED: bool = True  # по умолчанию включено
+
     # База данных (оставляем, если нужна для других целей)
     DB_HOST: str = "localhost"
     DB_PORT: int = 5432
@@ -41,16 +43,16 @@ class Settings(BaseSettings):
     TELEGRAM_USERS_IDS: str = ""
 
     # Параметры рабочего дня и пауз
-    WORK_START_HOUR: int = 10
-    WORK_START_MINUTE: int = 0
-    WORK_END_HOUR: int = 23
-    WORK_END_MINUTE: int = 0
+    WORK_START_HOUR: int = 9
+    WORK_START_MINUTE: int = 13
+    WORK_END_HOUR: int = 18
+    WORK_END_MINUTE: int = 41
     PAUSE_COUNT: int = 3
     PAUSE_MIN_MINUTES: int = 30
     PAUSE_MAX_MINUTES: int = 60
     MIN_GAP_MINUTES: int = 10
     DAILY_LIMIT_MIN: int = 53
-    DAILY_LIMIT_MAX: int = 137
+    DAILY_LIMIT_MAX: int = 97
 
     # Прокси (опционально)
     # PROXY_SERVER: Optional[str] = None  # например "http://proxy.example.com:8080"

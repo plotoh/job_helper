@@ -41,11 +41,11 @@ class Worker:
         await init_db()
         await self.browser_manager.start()
 
-        # Создаём контекст для парсинга (служебный аккаунт)
+        # Создаём контекст для парсинга (всегда нужен)
         parsing_cookies = getattr(settings, 'PARSING_COOKIES_FILE', None)
         self.parsing_context = await self.browser_manager.create_context(parsing_cookies)
 
-        # Запускаем планировщик парсинга
+        # Запускаем планировщик парсинга (всегда)
         self.parsing_scheduler = ParsingScheduler(self.parsing_context)
         asyncio.create_task(self.parsing_scheduler.run())
 
@@ -54,23 +54,27 @@ class Worker:
             result = await session.execute(select(Account))
             accounts = result.scalars().all()
 
-        # Для каждого аккаунта создаём контекст и воркер
-        for acc in accounts:
-            cookies_file = Path(settings.COOKIES_DIR) / f"{acc.tg_username}.txt"
-            if not cookies_file.exists():
-                logger.warning(f"Cookies file for account {acc.id} not found at {cookies_file}, skipping")
-                continue
-            context = await self.browser_manager.create_context(str(cookies_file))
-            worker = AccountWorker(
-                account_id=acc.id,
-                resume_id=acc.resume_id,
-                browser_context=context,
-                template=self.template
-            )
-            self.account_workers.append(worker)
-            asyncio.create_task(worker.run())
+        # Создаём воркеры для откликов, только если они включены
+        if settings.RESPONSES_ENABLED:
+            logger.info("Responses are ENABLED. Starting account workers.")
+            for acc in accounts:
+                cookies_file = Path(settings.COOKIES_DIR) / f"{acc.tg_username}.txt"
+                if not cookies_file.exists():
+                    logger.warning(f"Cookies file for account {acc.id} not found at {cookies_file}, skipping")
+                    continue
+                context = await self.browser_manager.create_context(str(cookies_file))
+                worker = AccountWorker(
+                    account_id=acc.id,
+                    resume_id=acc.resume_id,
+                    browser_context=context,
+                    template=self.template
+                )
+                self.account_workers.append(worker)
+                asyncio.create_task(worker.run())
+        else:
+            logger.info("Responses are DISABLED. No account workers will be started.")
 
-        # Запускаем задачу ежедневного планирования лимитов и пауз (в 00:05)
+        # Запускаем задачу ежедневного планирования лимитов (нужна для статистики)
         asyncio.create_task(self._daily_planner_loop())
 
         # Ожидаем сигнала остановки

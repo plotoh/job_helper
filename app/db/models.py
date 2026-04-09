@@ -22,12 +22,13 @@ class Vacancy(Base):
     work_format = Column(String, nullable=True)
     skills = Column(JSON, nullable=True)  # список навыков в JSON
     created_at = Column(DateTime, server_default=func.now())
+    is_actual = Column(Boolean, nullable=False, server_default='true')  # или default=True
 
 
 class Account(Base):
     __tablename__ = 'accounts'
 
-    id = Column(BigInteger, primary_key=True) ## tg_id
+    id = Column(BigInteger, primary_key=True)  ## tg_id
     tg_username = Column(String, unique=True, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     resume_id = Column(String, nullable=False)
@@ -114,9 +115,13 @@ class JuniorVacancy(Base):
     hh_id = Column(String, primary_key=True)
     title = Column(String, nullable=False)
     url = Column(String, nullable=False)
-    salary_text = Column(String, nullable=True)
-    experience_min = Column(Integer, nullable=True)
-    experience_max = Column(Integer, nullable=True)
-    work_format = Column(String, nullable=True)
-    skills = Column(JSON, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class SeniorVacancy(Base):
+    __tablename__ = 'senior_vacancies'
+
+    hh_id = Column(String, primary_key=True)
+    title = Column(String, nullable=False)
+    url = Column(String, nullable=False)
     created_at = Column(DateTime, server_default=func.now())

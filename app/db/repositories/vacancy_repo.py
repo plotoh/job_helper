@@ -44,7 +44,8 @@ class VacancyRepository(IVacancyRepository):
             experience_min=exp_min,
             experience_max=exp_max,
             work_format=vacancy.get('work_format'),
-            skills=skills_json
+            skills=skills_json,
+            is_actual=True
         )
         self.session.add(new_vac)
         await self.session.commit()
@@ -77,6 +78,11 @@ class VacancyRepository(IVacancyRepository):
 
     async def get_random_unresponded(self, account_id: int) -> Optional[Vacancy]:
         subquery = select(AccountVacancy.hh_id).where(AccountVacancy.account_id == account_id).scalar_subquery()
-        stmt = select(Vacancy).where(not_(Vacancy.hh_id.in_(subquery))).order_by(func.random()).limit(1)
+        stmt = select(Vacancy).where(
+            and_(
+                not_(Vacancy.hh_id.in_(subquery)),
+                Vacancy.is_actual == True
+            )
+        ).order_by(func.random()).limit(1)
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
