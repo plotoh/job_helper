@@ -8,12 +8,10 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.db import Account, AsyncSessionLocal, init_db
-
 from app.hh_client.browser_manager import BrowserManager
 from app.scheduler.account_worker import AccountWorker
 from app.scheduler.parsing_scheduler import ParsingScheduler
 from app.scheduler.daily_planner import generate_daily_limit, generate_pauses
-
 from app.db.repositories.account_state_repo import AccountStateRepository
 from app.utils.time_utils import msk_now, MSK_TZ, msk_today
 
@@ -26,7 +24,10 @@ class Worker:
         self.browser_manager = BrowserManager(headless=settings.PLAYWRIGHT_HEADLESS)
         self.parsing_context = None
         self.account_workers = []
+        self.worker_tasks = []           # храним задачи воркеров аккаунтов
         self.parsing_scheduler = None
+        self.parsing_task = None
+        self.daily_planner_task = None
         self.stop_event = asyncio.Event()
         self.template = self._load_template()
 
@@ -41,20 +42,31 @@ class Worker:
         await init_db()
         await self.browser_manager.start()
 
-        # Создаём контекст для парсинга (всегда нужен)
-        parsing_cookies = getattr(settings, 'PARSING_COOKIES_FILE', None)
-        self.parsing_context = await self.browser_manager.create_context(parsing_cookies)
+        # Подготовка прокси для парсинга (если задан)
+        parsing_proxy = None
+        if settings.PARSING_PROXY_SERVER:
+            parsing_proxy = {"server": settings.PARSING_PROXY_SERVER}
+            if settings.PARSING_PROXY_USERNAME:
+                parsing_proxy["username"] = settings.PARSING_PROXY_USERNAME
+            if settings.PARSING_PROXY_PASSWORD:
+                parsing_proxy["password"] = settings.PARSING_PROXY_PASSWORD
+            logger.info(f"Parsing will use proxy {settings.PARSING_PROXY_SERVER}")
 
-        # Запускаем планировщик парсинга (всегда)
+        parsing_cookies = getattr(settings, 'PARSING_COOKIES_FILE', None)
+        self.parsing_context = await self.browser_manager.create_context(
+            cookies_source=parsing_cookies,
+            proxy=parsing_proxy
+        )
+
+        # Запускаем планировщик парсинга
         self.parsing_scheduler = ParsingScheduler(self.parsing_context)
-        asyncio.create_task(self.parsing_scheduler.run())
+        self.parsing_task = asyncio.create_task(self.parsing_scheduler.run())
 
         # Загружаем список аккаунтов из БД
         async with AsyncSessionLocal() as session:
             result = await session.execute(select(Account))
             accounts = result.scalars().all()
 
-        # Создаём воркеры для откликов, только если они включены
         if settings.RESPONSES_ENABLED:
             logger.info("Responses are ENABLED. Starting account workers.")
             for acc in accounts:
@@ -62,7 +74,23 @@ class Worker:
                 if not cookies_file.exists():
                     logger.warning(f"Cookies file for account {acc.id} not found at {cookies_file}, skipping")
                     continue
-                context = await self.browser_manager.create_context(str(cookies_file))
+
+                # Подготовка прокси для аккаунта
+                proxy = None
+                if acc.proxy_server:
+                    proxy = {"server": acc.proxy_server}
+                    if acc.proxy_username:
+                        proxy["username"] = acc.proxy_username
+                    if acc.proxy_password:
+                        proxy["password"] = acc.proxy_password
+                    logger.info(f"Account {acc.id} will use proxy {acc.proxy_server}")
+                else:
+                    logger.info(f"Account {acc.id} will use direct connection (no proxy)")
+
+                context = await self.browser_manager.create_context(
+                    cookies_source=str(cookies_file),
+                    proxy=proxy
+                )
                 worker = AccountWorker(
                     account_id=acc.id,
                     resume_id=acc.resume_id,
@@ -70,61 +98,100 @@ class Worker:
                     template=self.template
                 )
                 self.account_workers.append(worker)
-                asyncio.create_task(worker.run())
+                task = asyncio.create_task(worker.run())
+                self.worker_tasks.append(task)
         else:
             logger.info("Responses are DISABLED. No account workers will be started.")
 
-        # Запускаем задачу ежедневного планирования лимитов (нужна для статистики)
-        asyncio.create_task(self._daily_planner_loop())
+        # Запускаем задачу ежедневного планирования лимитов
+        self.daily_planner_task = asyncio.create_task(self._daily_planner_loop())
 
         # Ожидаем сигнала остановки
         await self.stop_event.wait()
+        await self.stop()
 
     async def _daily_planner_loop(self):
-        while not self.stop_event.is_set():
-            now = msk_now()
-            next_run = datetime.combine(msk_today() + timedelta(days=1), time(0, 5)).replace(tzinfo=MSK_TZ)
-            sleep_seconds = (next_run - now).total_seconds()
-            if sleep_seconds > 0:
-                await asyncio.sleep(sleep_seconds)
+        try:
+            while not self.stop_event.is_set():
+                now = msk_now()
+                next_run = datetime.combine(msk_today() + timedelta(days=1), time(0, 5)).replace(tzinfo=MSK_TZ)
+                sleep_seconds = (next_run - now).total_seconds()
+                if sleep_seconds > 0:
+                    # Прерываемый сон
+                    await self._interruptible_sleep(sleep_seconds)
 
-            logger.info("Generating daily limits and pauses for all accounts")
-            async with AsyncSessionLocal() as session:
-                accounts = (await session.execute(select(Account))).scalars().all()
-                today = now.date()
-                state_repo = AccountStateRepository(session)
-                for acc in accounts:
-                    # Проверяем, есть ли уже запись на сегодня
-                    existing = await state_repo.get_for_today(acc.id, today)
-                    if existing:
-                        logger.debug(f"Account {acc.id} already has state for today, skipping")
-                        continue
-                    limit = generate_daily_limit()
-                    pauses = generate_pauses()
-                    data = {
-                        'daily_limit': limit,
-                        'pauses': pauses,
-                        'done_count': 0,
-                        'status': 'pending'
-                    }
-                    await state_repo.create_or_update(acc.id, today, data)
-                    logger.info(f"Account {acc.id}: limit={limit}, pauses={pauses}")
+                logger.info("Generating daily limits and pauses for all accounts")
+                async with AsyncSessionLocal() as session:
+                    accounts = (await session.execute(select(Account))).scalars().all()
+                    today = now.date()
+                    state_repo = AccountStateRepository(session)
+                    for acc in accounts:
+                        existing = await state_repo.get_for_today(acc.id, today)
+                        if existing:
+                            logger.debug(f"Account {acc.id} already has state for today, skipping")
+                            continue
+                        limit = generate_daily_limit()
+                        pauses = generate_pauses()
+                        data = {
+                            'daily_limit': limit,
+                            'pauses': pauses,
+                            'done_count': 0,
+                            'status': 'pending'
+                        }
+                        await state_repo.create_or_update(acc.id, today, data)
+                        logger.info(f"Account {acc.id}: limit={limit}, pauses={pauses}")
+        except asyncio.CancelledError:
+            logger.info("Daily planner loop cancelled")
+            raise
+
+    async def _interruptible_sleep(self, seconds: float):
+        """Спит с проверкой stop_event каждые 10 секунд."""
+        end_time = asyncio.get_event_loop().time() + seconds
+        while not self.stop_event.is_set():
+            remaining = end_time - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(remaining, 10))
 
     async def stop(self):
         logger.info("Stopping worker")
         self.stop_event.set()
+
+        # Останавливаем воркеры аккаунтов
         for w in self.account_workers:
             await w.stop()
+
+        # Останавливаем планировщик парсинга
         if self.parsing_scheduler:
             await self.parsing_scheduler.stop()
+
+        # Отменяем задачи и ждём их завершения
+        tasks = []
+        if self.parsing_task:
+            tasks.append(self.parsing_task)
+        if self.daily_planner_task:
+            tasks.append(self.daily_planner_task)
+        tasks.extend(self.worker_tasks)
+
+        for task in tasks:
+            task.cancel()
+
+        await asyncio.gather(*tasks, return_exceptions=True)
+
         await self.browser_manager.stop()
+        logger.info("Worker stopped")
 
 
 async def main():
     worker = Worker()
     loop = asyncio.get_running_loop()
+
+    def shutdown():
+        asyncio.create_task(worker.stop())
+
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(worker.stop()))
+        loop.add_signal_handler(sig, shutdown)
+
     await worker.start()
 
 

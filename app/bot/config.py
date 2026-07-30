@@ -7,8 +7,8 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = settings.TELEGRAM_BOT_TOKEN
 ADMIN_ID = settings.TELEGRAM_ADMIN_ID
 
-logger.info(f"🔑 Bot token loaded: {BOT_TOKEN[:10]}...")
-logger.info(f"👑 Admin ID: {ADMIN_ID}")
+# logger.info(f"🔑 Bot token loaded: {BOT_TOKEN[:10]}...")
+# logger.info(f"👑 Admin ID: {ADMIN_ID}")
 
 raw = settings.TELEGRAM_USERS_IDS.strip()
 logger.info(f"📋 Raw users config: {raw}")

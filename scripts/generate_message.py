@@ -5,6 +5,7 @@
 
 Пример запуска:
     python scripts/generate_message.py --vacancy "Python разработчик" --tg "@peyego1one"
+    {Хорошего дня|Удачного дня|Всего наилучшего|С уважением|С наилучшими пожеланиями}{!|.}
 """
 
 import os

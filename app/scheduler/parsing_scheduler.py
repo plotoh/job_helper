@@ -1,10 +1,8 @@
-# app/scheduler/parsing_scheduler.py
-
 import asyncio
 import logging
 import random
 from datetime import datetime, time, timedelta
-from typing import List, Tuple
+from typing import List
 
 from playwright.async_api import BrowserContext
 from sqlalchemy import select, and_
@@ -50,62 +48,76 @@ class ParsingScheduler:
         self.filter_service = VacancyFilter()
         self.stop_event = asyncio.Event()
 
-    async def run(self):
+    async def _interruptible_sleep(self, seconds: float):
+        """Спит с проверкой stop_event каждые 10 секунд."""
+        end_time = asyncio.get_event_loop().time() + seconds
         while not self.stop_event.is_set():
-            now = msk_now()
-            for idx, (sh, sm, eh, em) in enumerate(PARSING_WINDOWS):
-                window_start = time(sh, sm)
-                window_end = time(eh, em)
-                if now.time() > window_end:
-                    continue
+            remaining = end_time - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(remaining, 10))
 
-                async with AsyncSessionLocal() as session:
-                    stmt = select(ParsingLog).where(
-                        and_(
-                            ParsingLog.window_index == idx,
-                            ParsingLog.started_at >= datetime.combine(now.date(), time(0, 0))
-                        )
-                    ).order_by(ParsingLog.started_at.desc())
-                    result = await session.execute(stmt)
-                    existing = result.scalars().first()
-
-                    if existing:
-                        if existing.status == 'started' and (now - existing.started_at).total_seconds() > 1800:
-                            logger.warning(f"Window {idx} stuck as 'started' for >30min, removing and re-running")
-                            await session.delete(existing)
-                            await session.commit()
-                        else:
-                            logger.info(f"Window {idx} already has a log entry today ({existing.status}), skipping")
-                            continue
-
-                start_dt = datetime.combine(now.date(), window_start).replace(tzinfo=MSK_TZ)
-                end_dt = datetime.combine(now.date(), window_end).replace(tzinfo=MSK_TZ)
-
-                if now < start_dt:
-                    max_delay = (end_dt - start_dt).total_seconds()
-                    delay = random.uniform(0, max_delay)
-                    run_at = start_dt + timedelta(seconds=delay)
-                else:
-                    if (end_dt - now).total_seconds() < 300:
-                        logger.info(f"Window {idx} ends soon (<5 min), skipping")
+    async def run(self):
+        try:
+            while not self.stop_event.is_set():
+                now = msk_now()
+                for idx, (sh, sm, eh, em) in enumerate(PARSING_WINDOWS):
+                    window_start = time(sh, sm)
+                    window_end = time(eh, em)
+                    if now.time() > window_end:
                         continue
-                    max_delay = (end_dt - now).total_seconds() - 300
-                    delay = random.uniform(0, max_delay)
-                    run_at = now + timedelta(seconds=delay)
 
-                wait_seconds = (run_at - now).total_seconds()
-                if wait_seconds > 0:
-                    logger.info(f"Parsing window {idx} scheduled at {run_at}")
-                    await asyncio.sleep(wait_seconds)
+                    async with AsyncSessionLocal() as session:
+                        stmt = select(ParsingLog).where(
+                            and_(
+                                ParsingLog.window_index == idx,
+                                ParsingLog.started_at >= datetime.combine(now.date(), time(0, 0))
+                            )
+                        ).order_by(ParsingLog.started_at.desc())
+                        # TODO: при масштабировании использовать with_for_update(skip_locked=True)
+                        result = await session.execute(stmt)
+                        existing = result.scalars().first()
 
-                await self._run_parsing(idx)
+                        if existing:
+                            if existing.status == 'started' and (now - existing.started_at).total_seconds() > 1800:
+                                logger.warning(f"Window {idx} stuck as 'started' for >30min, removing and re-running")
+                                await session.delete(existing)
+                                await session.commit()
+                            else:
+                                logger.info(f"Window {idx} already has a log entry today ({existing.status}), skipping")
+                                continue
 
-            tomorrow = now.date() + timedelta(days=1)
-            next_check = datetime.combine(tomorrow, time(0, 5)).replace(tzinfo=MSK_TZ)
-            sleep_seconds = (next_check - now).total_seconds()
-            if sleep_seconds > 0:
-                logger.info(f"Parsing scheduler: next check at {next_check}")
-                await asyncio.sleep(sleep_seconds)
+                    start_dt = datetime.combine(now.date(), window_start).replace(tzinfo=MSK_TZ)
+                    end_dt = datetime.combine(now.date(), window_end).replace(tzinfo=MSK_TZ)
+
+                    if now < start_dt:
+                        max_delay = (end_dt - start_dt).total_seconds()
+                        delay = random.uniform(0, max_delay)
+                        run_at = start_dt + timedelta(seconds=delay)
+                    else:
+                        if (end_dt - now).total_seconds() < 300:
+                            logger.info(f"Window {idx} ends soon (<5 min), skipping")
+                            continue
+                        max_delay = (end_dt - now).total_seconds() - 300
+                        delay = random.uniform(0, max_delay)
+                        run_at = now + timedelta(seconds=delay)
+
+                    wait_seconds = (run_at - now).total_seconds()
+                    if wait_seconds > 0:
+                        logger.info(f"Parsing window {idx} scheduled at {run_at}")
+                        await self._interruptible_sleep(wait_seconds)
+
+                    await self._run_parsing(idx)
+
+                tomorrow = now.date() + timedelta(days=1)
+                next_check = datetime.combine(tomorrow, time(0, 5)).replace(tzinfo=MSK_TZ)
+                sleep_seconds = (next_check - now).total_seconds()
+                if sleep_seconds > 0:
+                    logger.info(f"Parsing scheduler: next check at {next_check}")
+                    await self._interruptible_sleep(sleep_seconds)
+        except asyncio.CancelledError:
+            logger.info("Parsing scheduler cancelled")
+            raise
 
     async def _run_parsing(self, window_idx: int):
         logger.info(f"Starting parsing for window {window_idx}")
@@ -143,7 +155,6 @@ class ParsingScheduler:
                     logger.info(f"No vacancies found on page {next_page}, stopping further pages.")
                     break
 
-                # Фильтрация
                 regular = []
                 junior = []
                 senior = []
@@ -161,9 +172,9 @@ class ParsingScheduler:
                         rejected.append(vac)
 
                 logger.info(
-                    f"Page {next_page}: regular={len(regular)}, junior={len(junior)}, senior={len(senior)}, rejected={len(rejected)}")
+                    f"Page {next_page}: regular={len(regular)}, junior={len(junior)}, senior={len(senior)}, rejected={len(rejected)}"
+                )
 
-                # Сохраняем rejected
                 if rejected:
                     async with AsyncSessionLocal() as session:
                         for vac in rejected:
@@ -177,7 +188,6 @@ class ParsingScheduler:
                         await session.commit()
                     logger.info(f"Saved {len(rejected)} filtered-out vacancies")
 
-                # Сохраняем junior
                 if junior:
                     async with AsyncSessionLocal() as session:
                         for vac in junior:
@@ -190,7 +200,6 @@ class ParsingScheduler:
                         await session.commit()
                     logger.info(f"Saved {len(junior)} junior vacancies")
 
-                # Сохраняем senior
                 if senior:
                     async with AsyncSessionLocal() as session:
                         for vac in senior:
@@ -203,12 +212,11 @@ class ParsingScheduler:
                         await session.commit()
                     logger.info(f"Saved {len(senior)} senior vacancies")
 
-                # Детальный парсинг regular
                 semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT)
 
                 async def parse_one(vac):
                     async with semaphore:
-                        logger.info(f"🔍 Парсинг вакансии {vac['id']} - {vac['title']}")
+                        logger.debug(f"🔍 Парсинг вакансии {vac['id']} - {vac['title']}")
                         try:
                             details = await self.detail_parser.parse(vac['url'], self.context)
                             return {**vac, **details}
@@ -220,7 +228,6 @@ class ParsingScheduler:
                 results = await asyncio.gather(*tasks)
                 successful = [r for r in results if r is not None]
 
-                # Сохраняем regular в основную таблицу
                 async with AsyncSessionLocal() as session:
                     repo = VacancyRepository(session)
                     saved_count = 0
@@ -231,13 +238,11 @@ class ParsingScheduler:
                     logger.info(f"Page {next_page}: saved {saved_count} new vacancies")
                     total_saved += saved_count
 
-                # Обновляем прогресс
                 async with AsyncSessionLocal() as session:
                     progress_repo = ParsingProgressRepository(session)
                     await progress_repo.update_last_page(settings.HH_SEARCH_URL, next_page)
                     pages_processed += 1
 
-            # Успешное завершение окна
             async with AsyncSessionLocal() as session:
                 stmt = select(ParsingLog).where(ParsingLog.id == log_id)
                 result = await session.execute(stmt)

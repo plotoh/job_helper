@@ -29,19 +29,25 @@ class AccountWorker:
         self.template = template
         self.response_service = HHResponseService()
         self.stop_event = asyncio.Event()
-        self.vacancy_attempts = {}  # {vacancy_id: attempts}
+        self.vacancy_attempts = {}
         self.consecutive_failures = 0
 
+    async def _interruptible_sleep(self, seconds: float):
+        """Спит с проверкой stop_event каждые 10 секунд."""
+        end_time = asyncio.get_event_loop().time() + seconds
+        while not self.stop_event.is_set():
+            remaining = end_time - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(remaining, 10))
+
     async def run(self):
-        """Основной цикл воркера."""
         logger.info(f"Starting worker for account {self.account_id}")
 
-        while not self.stop_event.is_set():
-            try:
-                # Получаем сегодняшнюю дату
+        try:
+            while not self.stop_event.is_set():
                 today = msk_now().date()
 
-                # Создаём сессию БД (каждую итерацию)
                 async with AsyncSessionLocal() as session:
                     state_repo = AccountStateRepository(session)
                     state = await state_repo.get_for_today(self.account_id, today)
@@ -60,16 +66,15 @@ class AccountWorker:
                         state = await state_repo.create_or_update(self.account_id, today, data)
                         continue
 
-                    # Проверяем, рабочий ли сейчас день
                     now = msk_now()
                     current_time = now.time()
 
                     # Если ещё не началось рабочее время
                     if current_time < WORK_START:
-                        sleep_seconds = (
-                                    datetime.combine(now.date(), WORK_START).replace(tzinfo=MSK_TZ) - now).total_seconds()
-                        logger.info(f"Account {self.account_id}: before work hours, sleeping {sleep_seconds:.0f}s")
-                        await asyncio.sleep(sleep_seconds)
+                        sleep_seconds = (datetime.combine(now.date(), WORK_START).replace(
+                            tzinfo=MSK_TZ) - now).total_seconds()
+                        logger.debug(f"Account {self.account_id}: before work hours, sleeping {sleep_seconds:.0f}s")
+                        await self._interruptible_sleep(sleep_seconds)
                         continue
 
                     # Если рабочий день закончился
@@ -77,11 +82,10 @@ class AccountWorker:
                         if state.status != 'completed':
                             await state_repo.mark_completed(self.account_id, today)
                         logger.info(f"Account {self.account_id}: work day ended or completed. Sleeping until tomorrow.")
-                        # Спим до следующего рабочего дня (10:00 следующего дня)
                         tomorrow = now.date() + timedelta(days=1)
                         next_start = datetime.combine(tomorrow, WORK_START).replace(tzinfo=MSK_TZ)
                         sleep_seconds = (next_start - now).total_seconds()
-                        await asyncio.sleep(sleep_seconds)
+                        await self._interruptible_sleep(sleep_seconds)
                         continue
 
                     # Если лимит уже достигнут
@@ -90,24 +94,23 @@ class AccountWorker:
                         await state_repo.update_status(self.account_id, today, 'completed')
                         continue
 
-                    # --- Обработка статуса 'paused' из БД (если воркер перезапустился во время паузы) ---
+                    # Обработка статуса 'paused' из БД
                     if state.status == 'paused' and state.pause_until:
                         now_naive = now.replace(tzinfo=None)
                         if state.pause_until > now_naive:
                             sleep_seconds = (state.pause_until - now_naive).total_seconds()
-                            logger.info(
+                            logger.debug(
                                 f"Account {self.account_id}: still in pause until {state.pause_until}, sleeping {sleep_seconds:.0f}s")
-                            await asyncio.sleep(sleep_seconds)
+                            await self._interruptible_sleep(sleep_seconds)
                             await state_repo.update_status(self.account_id, today, 'active', pause_until=None)
-                            logger.info(f"Account {self.account_id}: pause ended, resuming")
+                            logger.debug(f"Account {self.account_id}: pause ended, resuming")
                             continue
                         else:
                             await state_repo.update_status(self.account_id, today, 'active', pause_until=None)
-                            logger.info(f"Account {self.account_id}: pause already passed, resuming")
-                            # Продолжаем нормальную работу
+                            logger.debug(f"Account {self.account_id}: pause already passed, resuming")
 
-                    # --- Проверка запланированных пауз ---
-                    pauses = state.pauses  # список [{"start": "HH:MM", "end": "HH:MM"}, ...]
+                    # Проверка запланированных пауз
+                    pauses = state.pauses
                     in_pause, pause_end = self._check_pause(current_time, pauses)
                     if in_pause:
                         pause_end_dt = datetime.combine(now.date(), pause_end).replace(tzinfo=MSK_TZ)
@@ -116,58 +119,48 @@ class AccountWorker:
                             logger.warning(f"Account {self.account_id}: pause end {pause_end} is in the past, skipping")
                             continue
 
-                        logger.info(f"Account {self.account_id}: in pause until {pause_end}, sleeping {sleep_seconds:.0f}s")
+                        logger.debug(
+                            f"Account {self.account_id}: in pause until {pause_end}, sleeping {sleep_seconds:.0f}s")
                         pause_until_naive = (now + timedelta(seconds=sleep_seconds)).replace(tzinfo=None)
                         await state_repo.update_status(self.account_id, today, 'paused', pause_until=pause_until_naive)
-                        try:
-                            await asyncio.sleep(sleep_seconds)
-                        except asyncio.CancelledError:
-                            logger.warning(f"Account {self.account_id}: sleep cancelled during pause")
-                            raise
+                        await self._interruptible_sleep(sleep_seconds)
                         await state_repo.update_status(self.account_id, today, 'active', pause_until=None)
-                        logger.info(f"Account {self.account_id}: pause ended, resuming")
+                        logger.debug(f"Account {self.account_id}: pause ended, resuming")
                         continue
 
-                    # --- Определяем, когда следующая пауза, чтобы не начать отклик перед ней ---
+                    # Определяем, когда следующая пауза
                     next_pause_start = self._next_pause_start(current_time, pauses)
                     max_sleep = None
                     if next_pause_start:
                         next_start_dt = datetime.combine(now.date(), next_pause_start).replace(tzinfo=MSK_TZ)
                         seconds_to_pause = (next_start_dt - now).total_seconds()
-                        # Нельзя спать дольше, чем до начала паузы минус небольшой запас (1 мин)
                         max_sleep = max(0.0, seconds_to_pause - 60)
 
-                    # --- Выбираем интервал ожидания (случайный в пределах от min до max, но с учётом паузы) ---
-                    min_interval = 60  # 1 минута в секундах
-                    max_interval = 300  # 5 минут
-
+                    # Интервал ожидания перед откликом
+                    min_interval = 60
+                    max_interval = 300
                     if max_sleep is not None:
                         upper_bound = min(max_interval, max_sleep)
                     else:
                         upper_bound = max_interval
-
-                    # Убедимся, что верхняя граница не меньше нижней
                     if upper_bound < min_interval:
                         upper_bound = min_interval
 
-                    # Используем uniform для генерации float (asyncio.sleep поддерживает float)
                     interval = random.uniform(min_interval, upper_bound)
-                    logger.info(f"Account {self.account_id}: waiting {interval:.1f}s before next response")
-                    await asyncio.sleep(interval)
+                    logger.debug(f"Account {self.account_id}: waiting {interval:.1f}s before next response")
+                    await self._interruptible_sleep(interval)
 
-                    # --- Выполняем отклик ---
+                    # Выполняем отклик
                     await self._do_response(session, state, today)
 
-            except asyncio.CancelledError:
-                logger.info(f"Account {self.account_id}: worker cancelled")
-                break
-            except Exception as e:
-                logger.exception(f"Account {self.account_id}: unexpected error in main loop: {e}")
-                # Небольшая пауза перед повтором, чтобы избежать бесконечного цикла ошибок
-                await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            logger.info(f"Account {self.account_id}: worker cancelled")
+            raise
+        except Exception as e:
+            logger.exception(f"Account {self.account_id}: unexpected error in main loop: {e}")
+            await asyncio.sleep(10)
 
     def _check_pause(self, current_time: time, pauses: list) -> (bool, Optional[time]):
-        """Проверяет, находится ли текущее время внутри какой-либо паузы."""
         for p in pauses:
             start = datetime.strptime(p['start'], "%H:%M").time()
             end = datetime.strptime(p['end'], "%H:%M").time()
@@ -176,7 +169,6 @@ class AccountWorker:
         return False, None
 
     def _next_pause_start(self, current_time: time, pauses: list) -> Optional[time]:
-        """Возвращает время начала следующей паузы (ближайшей после current_time) или None."""
         starts = [datetime.strptime(p['start'], "%H:%M").time() for p in pauses]
         future_starts = [t for t in starts if t > current_time]
         if future_starts:
@@ -184,37 +176,34 @@ class AccountWorker:
         return None
 
     async def _do_response(self, session: AsyncSession, state, today):
-        """Один цикл отклика."""
         vacancy_repo = VacancyRepository(session)
         error_repo = ResponseErrorRepository(session)
         state_repo = AccountStateRepository(session)
 
-        # Получаем случайную вакансию
         vacancy = await vacancy_repo.get_random_unresponded(self.account_id)
         if not vacancy:
-            # Если вакансий нет, увеличиваем счётчик неудач
             self.consecutive_failures += 1
-            if self.consecutive_failures >= 5:  # допустим, после 5 неудач подряд считаем, что день исчерпан
+            if self.consecutive_failures >= 5:
                 logger.warning(
-                    f"Account {self.account_id}: no actual vacancies after {self.consecutive_failures} attempts, marking day as completed.")
-                await state_repo.mark_completed(self.account_id, today)
-                return
+                    f"Account {self.account_id}: no actual vacancies after {self.consecutive_failures} attempts. "
+                    "Waiting longer before retry."
+                )
+                await self._interruptible_sleep(3600)  # час
+                self.consecutive_failures = 0
             else:
-                logger.info(
-                    f"Account {self.account_id}: no actual vacancies, attempt {self.consecutive_failures}, waiting longer.")
-                await asyncio.sleep(3600)  # ждём 10 минут
-                return
+                logger.debug(
+                    f"Account {self.account_id}: no actual vacancies, attempt {self.consecutive_failures}. Waiting 10 minutes.")
+                await self._interruptible_sleep(600)
+            return
         else:
-            self.consecutive_failures = 0  # сбрасываем при успехе
+            self.consecutive_failures = 0
 
-        # Генерируем сообщение
         context = {
             "vacancy_name": vacancy.title,
             "tg_username": settings.TG_USERNAME,
         }
         message = generate_message(self.template, context)
 
-        # Выполняем отклик
         try:
             success = await self.response_service.respond_to_vacancy(
                 vacancy.url, self.resume_id, message, self.context
@@ -233,10 +222,10 @@ class AccountWorker:
             new_done = await state_repo.increment_done(self.account_id, today)
             logger.info(f"Account {self.account_id}: responded to {vacancy.hh_id}, done {new_done}/{state.daily_limit}")
             await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status="success")
-            # Сбрасываем счётчик попыток при успехе
             self.vacancy_attempts.pop(vacancy.hh_id, None)
         else:
-            await error_repo.add(self.account_id, vacancy.hh_id, "Response returned False", error_type='response_failed')
+            await error_repo.add(self.account_id, vacancy.hh_id, "Response returned False",
+                                 error_type='response_failed')
             attempts = self.vacancy_attempts.get(vacancy.hh_id, 0) + 1
             self.vacancy_attempts[vacancy.hh_id] = attempts
             if attempts >= 3:

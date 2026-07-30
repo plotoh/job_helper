@@ -19,29 +19,38 @@ logger = logging.getLogger(__name__)
 async def hourly_report(bot_instance: Bot):
     logger.info("🕐 Задача часовых отчётов запущена")
     max_retries = 5
-    base_delay = 10  # секунд
+    base_delay = 10
 
-    while True:
-        now = msk_now()
-        next_hour = (now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
-        sleep_seconds = (next_hour - now).total_seconds()
-        logger.info(f"⏳ Следующий отчёт через {sleep_seconds:.0f} сек")
-        await asyncio.sleep(sleep_seconds)
+    try:
+        while True:
+            now = msk_now()
+            next_hour = (now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
+            sleep_seconds = (next_hour - now).total_seconds()
+            logger.info(f"⏳ Следующий отчёт через {sleep_seconds:.0f} сек")
 
-        for attempt in range(max_retries):
-            try:
-                report = await generate_report()
-                await bot_instance.send_message(ADMIN_ID, report)
-                logger.info("✅ Часовой отчёт отправлен")
-                break  # успех — выходим из цикла повторных попыток
-            except Exception as e:
-                logger.warning(f"⚠️ Попытка {attempt + 1}/{max_retries} не удалась: {type(e).__name__}: {e}")
-                if attempt < max_retries - 1:
-                    delay = base_delay * (2 ** attempt)  # экспоненциальная задержка
-                    logger.info(f"🔄 Повтор через {delay} сек...")
-                    await asyncio.sleep(delay)
-                else:
-                    logger.error("❌ Все попытки отправки отчёта исчерпаны")
+            # Разбиваем длинный сон на интервалы с проверкой отмены
+            while sleep_seconds > 0:
+                chunk = min(sleep_seconds, 60)  # спим по 60 сек максимум
+                await asyncio.sleep(chunk)
+                sleep_seconds -= chunk
+
+            for attempt in range(max_retries):
+                try:
+                    report = await generate_report()
+                    await bot_instance.send_message(ADMIN_ID, report)
+                    logger.info("✅ Часовой отчёт отправлен")
+                    break
+                except Exception as e:
+                    logger.warning(f"⚠️ Попытка {attempt + 1}/{max_retries} не удалась: {type(e).__name__}: {e}")
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)
+                        logger.info(f"🔄 Повтор через {delay} сек...")
+                        await asyncio.sleep(delay)
+                    else:
+                        logger.error("❌ Все попытки отправки отчёта исчерпаны")
+    except asyncio.CancelledError:
+        logger.info("🛑 Задача часовых отчётов отменена")
+        raise
 
 
 async def main():
@@ -56,7 +65,8 @@ async def main():
     dp.include_router(router)
     logger.info("✅ Роутер подключён")
 
-    asyncio.create_task(hourly_report(bot_instance=bot))
+    # Сохраняем задачу для возможности отмены
+    report_task = asyncio.create_task(hourly_report(bot_instance=bot))
     logger.info("✅ Задача отчётов создана")
 
     logger.info("🔄 Запуск polling...")
@@ -65,6 +75,11 @@ async def main():
     except Exception as e:
         logger.exception(f"❌ Ошибка polling: {e}")
     finally:
+        report_task.cancel()
+        try:
+            await report_task
+        except asyncio.CancelledError:
+            pass
         await bot.session.close()
         logger.info("🛑 Бот остановлен")
 
