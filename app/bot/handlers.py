@@ -6,7 +6,7 @@ from sqlalchemy import select
 from app.bot.reporter import generate_report, get_user_stats
 from app.bot.keyboards import admin_keyboard, user_keyboard
 from app.bot.config import ADMIN_ID, USERS_IDS
-from app.db import AsyncSessionLocal, Account
+from app.db import AsyncSessionLocal, Account, ResponseErrorRepository
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -142,6 +142,27 @@ async def cmd_help(message: Message):
             "/help – помощь",
             reply_markup=user_keyboard()
         )
+
+
+@router.message(Command("myerrors"))
+@router.message(F.text == "❌ Мои ошибки")
+async def cmd_myerrors(message: Message):
+    user_id = message.from_user.id
+    if not is_allowed(user_id):
+        return
+
+    async with AsyncSessionLocal() as session:
+        repo = ResponseErrorRepository(session)
+        errors = await repo.get_unreported_errors(user_id)
+        if not errors:
+            await message.answer("✅ У вас нет новых ошибок откликов.")
+            return
+        lines = ["❌ **Список ваших ошибок отклика:**"]
+        for e in errors[:10]:
+            lines.append(f"• [{e['title']}]({e['url']}) — {e['error_text'][:80]}")
+        if len(errors) > 10:
+            lines.append(f"… и ещё {len(errors) - 10} ошибок. Они будут в ежедневном отчёте.")
+        await message.answer("\n".join(lines), parse_mode="Markdown")
 
 
 @router.message()

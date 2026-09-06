@@ -3,6 +3,7 @@ import logging
 from typing import Optional, Union, List, Dict
 from playwright.async_api import async_playwright, Browser, BrowserContext
 
+from app.config import settings
 from app.hh_client.cookie_loader import load_cookies_full
 
 logger = logging.getLogger(__name__)
@@ -34,27 +35,34 @@ class BrowserManager:
         )
         logger.info("Browser started")
 
-    # async def create_context(self, cookies_source: Optional[Union[str, List[dict]]] = None) -> BrowserContext:
-    #     if not self.browser:
-    #         raise RuntimeError("Browser not started. Call start() first.")
-    #     context_options = {}
-    #     if settings.PROXY_SERVER:
-    #         proxy = {
-    #             "server": settings.PROXY_SERVER,
-    #         }
-    #         if settings.PROXY_USERNAME and settings.PROXY_PASSWORD:
-    #             proxy["username"] = settings.PROXY_USERNAME
-    #             proxy["password"] = settings.PROXY_PASSWORD
-    #         context_options["proxy"] = proxy
-    #     context = await self.browser.new_context(**context_options)
-    async def create_context(self, cookies_source: Optional[Union[str, List[dict]]] = None) -> BrowserContext:
+    async def create_context(self, cookies_source: Optional[Union[str, List[dict]]] = None,
+                             proxy: Optional[dict] = None) -> BrowserContext:
         """
         Создаёт новый контекст (изолированное окружение) и загружает в него куки.
         cookies_source: либо путь к файлу Netscape, либо список кук в формате Playwright.
+        proxy: словарь с параметрами прокси (server, username, password) – опционально.
+        Если proxy не передан, используется глобальный из настроек (settings.PROXY_SERVER).
         """
         if not self.browser:
             raise RuntimeError("Browser not started. Call start() first.")
-        context = await self.browser.new_context()
+
+        # Определяем прокси для этого контекста
+        final_proxy = proxy
+        if final_proxy is None and settings.PROXY_SERVER:
+            final_proxy = {
+                "server": settings.PROXY_SERVER,
+            }
+            if settings.PROXY_USERNAME:
+                final_proxy["username"] = settings.PROXY_USERNAME
+            if settings.PROXY_PASSWORD:
+                final_proxy["password"] = settings.PROXY_PASSWORD
+
+        context_options = {}
+        if final_proxy:
+            context_options["proxy"] = final_proxy
+
+        context = await self.browser.new_context(**context_options)
+
         if cookies_source:
             if isinstance(cookies_source, str):
                 cookies_list = load_cookies_full(cookies_source)
@@ -63,6 +71,7 @@ class BrowserManager:
             if cookies_list:
                 await context.add_cookies(cookies_list)
                 logger.info(f"Added {len(cookies_list)} cookies to new context")
+
         self.contexts.append(context)
         return context
 

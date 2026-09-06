@@ -55,9 +55,16 @@ class Settings(BaseSettings):
     DAILY_LIMIT_MAX: int = 97
 
     # Прокси (опционально)
-    # PROXY_SERVER: Optional[str] = None  # например "http://proxy.example.com:8080"
-    # PROXY_USERNAME: Optional[str] = None
-    # PROXY_PASSWORD: Optional[str] = None
+    PROXY_SERVER: Optional[str] = None  # например "http://proxy.example.com:8080"
+    PROXY_USERNAME: Optional[str] = None
+    PROXY_PASSWORD: Optional[str] = None
+
+    DAILY_PARSING_LIMIT: int = 100
+    VACANCY_TTL_DAYS: int = 7
+    MAX_USES_PER_VACANCY: int = 2
+    ERROR_REPORT_HOUR: int = 19
+    ERROR_REPORT_MINUTE: int = 0
+    REJECTED_LOGS_DIR: str = "logs"
 
     # Логирование
     LOG_LEVEL: str = "INFO"

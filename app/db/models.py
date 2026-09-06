@@ -23,6 +23,7 @@ class Vacancy(Base):
     skills = Column(JSON, nullable=True)  # список навыков в JSON
     created_at = Column(DateTime, server_default=func.now())
     is_actual = Column(Boolean, nullable=False, server_default='true')  # или default=True
+    used_count = Column(Integer, default=0)          # сколько аккаунтов уже откликнулось
 
 
 class Account(Base):
@@ -55,6 +56,8 @@ class ResponseError(Base):
     error_text = Column(String, nullable=False)
     error_type = Column(String, nullable=True)  # можно хранить тип: 'network', 'auth', 'response_failed' и т.п.
     created_at = Column(DateTime, server_default=func.now())
+    reported = Column(Boolean, default=False)        # отправлено ли пользователю
+    reported_at = Column(DateTime, nullable=True)    # когда отправлено
 
 
 class AccountDailyState(Base):

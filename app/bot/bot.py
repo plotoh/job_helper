@@ -4,6 +4,9 @@ from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+
+from app.config import settings
+from app.db import AsyncSessionLocal
 from app.utils.time_utils import msk_now
 from app.bot.handlers import router
 from app.bot.reporter import generate_report
@@ -53,6 +56,62 @@ async def hourly_report(bot_instance: Bot):
         raise
 
 
+async def daily_error_report(bot_instance: Bot):
+    """Отправляет каждому аккаунту список ошибок, которые ещё не были отправлены."""
+    logger.info("📧 Задача ежедневного отчёта об ошибках запущена")
+    while True:
+        now = msk_now()
+        target = now.replace(
+            hour=settings.ERROR_REPORT_HOUR,
+            minute=settings.ERROR_REPORT_MINUTE,
+            second=0, microsecond=0
+        )
+        if now >= target:
+            target += timedelta(days=1)
+        sleep_seconds = (target - now).total_seconds()
+        logger.info(f"⏳ Следующий отчёт об ошибках через {sleep_seconds:.0f} сек")
+
+        # Прерываемый сон
+        while sleep_seconds > 0:
+            chunk = min(sleep_seconds, 60)
+            await asyncio.sleep(chunk)
+            sleep_seconds -= chunk
+
+        # Отправляем ошибки
+        try:
+            async with AsyncSessionLocal() as session:
+                from app.db.repositories.response_error_repo import ResponseErrorRepository
+                from app.db.models import Account
+                from sqlalchemy import select
+
+                accounts = (await session.execute(select(Account))).scalars().all()
+                for acc in accounts:
+                    repo = ResponseErrorRepository(session)
+                    errors = await repo.get_unreported_errors(acc.id)
+                    if not errors:
+                        continue
+                    # Формируем текст
+                    name = acc.tg_username or f"аккаунт {acc.id}"
+                    lines = [f"❌ **Ошибки отклика для {name}:**"]
+                    for e in errors[:10]:
+                        lines.append(f"• [{e['title']}]({e['url']}) — {e['error_text'][:80]}")
+                    if len(errors) > 10:
+                        lines.append(f"… и ещё {len(errors) - 10}.")
+                    text = "\n".join(lines)
+
+                    try:
+                        await bot_instance.send_message(acc.id, text)
+                        logger.info(f"✅ Отчёт об ошибках отправлен для {acc.id}")
+                        # Помечаем как отправленные
+                        ids = [e["id"] for e in errors]
+                        await repo.mark_as_reported(ids)
+                    except Exception as e:
+                        logger.error(f"❌ Не удалось отправить отчёт для {acc.id}: {e}")
+                    await asyncio.sleep(1)
+        except Exception as e:
+            logger.exception(f"❌ Ошибка при отправке ежедневного отчёта об ошибках: {e}")
+
+
 async def main():
     logger.info("🚀 Бот запускается...")
     logger.info(f"📋 Admin ID: {ADMIN_ID}")
@@ -67,6 +126,7 @@ async def main():
 
     # Сохраняем задачу для возможности отмены
     report_task = asyncio.create_task(hourly_report(bot_instance=bot))
+    daily_error_task = asyncio.create_task(daily_error_report(bot_instance=bot))
     logger.info("✅ Задача отчётов создана")
 
     logger.info("🔄 Запуск polling...")
@@ -76,6 +136,7 @@ async def main():
         logger.exception(f"❌ Ошибка polling: {e}")
     finally:
         report_task.cancel()
+        daily_error_task.cancel()
         try:
             await report_task
         except asyncio.CancelledError:

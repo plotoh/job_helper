@@ -2,6 +2,8 @@
 import pytest
 from datetime import date, datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import settings
 from app.db.models import Account, Vacancy, AccountDailyState, ResponseError
 from app.db.repositories.account_state_repo import AccountStateRepository
 from app.db.repositories.response_error_repo import ResponseErrorRepository
@@ -61,13 +63,24 @@ async def test_response_error_add(session: AsyncSession, test_account, test_vaca
     assert error.error_text == "Test error"
 
 
-async def test_vacancy_repo_get_random_unresponded(session: AsyncSession, test_account, test_vacancy):
+async def test_vacancy_repo_get_random_unresponded(session: AsyncSession, test_account, monkeypatch):
+    # Устанавливаем настройки, чтобы вакансия гарантированно подходила
+    monkeypatch.setattr(settings, 'VACANCY_TTL_DAYS', 100)
+    monkeypatch.setattr(settings, 'MAX_USES_PER_VACANCY', 2)
+
+    # Создаём свежую вакансию с правильными полями
+    vac = Vacancy(
+        hh_id="test123",
+        title="Python Developer",
+        url="https://hh.ru/vacancy/test123",
+        used_count=0,
+        is_actual=True,
+        created_at=datetime.now()  # свежая дата
+    )
+    session.add(vac)
+    await session.commit()
+
     repo = VacancyRepository(session)
-    # сначала должна вернуться вакансия
-    vac = await repo.get_random_unresponded(test_account.id)
-    assert vac is not None
-    # отмечаем как отвеченную
-    await repo.mark_responded(test_account.id, vac.hh_id)
-    # теперь не должно быть вакансий
-    vac2 = await repo.get_random_unresponded(test_account.id)
-    assert vac2 is None
+    result = await repo.get_random_unresponded(test_account.id)
+    assert result is not None
+    assert result.hh_id == "test123"

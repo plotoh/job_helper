@@ -1,8 +1,8 @@
 from datetime import datetime, timedelta
-from typing import Optional
-from sqlalchemy import select, func, and_
+from typing import Optional, List, Dict
+from sqlalchemy import select, func, and_, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.db.models import ResponseError
+from app.db.models import ResponseError, Vacancy
 
 
 class ResponseErrorRepository:
@@ -32,3 +32,34 @@ class ResponseErrorRepository:
         )
         result = await self.session.execute(stmt)
         return result.scalar()
+
+    async def get_unreported_errors(self, account_id: int) -> List[Dict]:
+        stmt = (
+            select(ResponseError, Vacancy.url, Vacancy.title)
+            .join(Vacancy, ResponseError.vacancy_id == Vacancy.hh_id)
+            .where(and_(ResponseError.account_id == account_id, ResponseError.reported == False))
+            .order_by(ResponseError.created_at.desc())
+        )
+        result = await self.session.execute(stmt)
+        rows = result.all()
+        return [
+            {
+                "id": err.id,
+                "vacancy_id": err.vacancy_id,
+                "title": title,
+                "url": url,
+                "error_text": err.error_text,
+                "error_type": err.error_type,
+                "created_at": err.created_at,
+            }
+            for err, url, title in rows
+        ]
+
+    async def mark_as_reported(self, error_ids: List[int]):
+        stmt = (
+            update(ResponseError)
+            .where(ResponseError.id.in_(error_ids))
+            .values(reported=True, reported_at=func.now())
+        )
+        await self.session.execute(stmt)
+        await self.session.commit()

@@ -11,6 +11,8 @@ def admin_keyboard() -> ReplyKeyboardMarkup:
 
 
 def user_keyboard() -> ReplyKeyboardMarkup:
-    logger.debug("🎹 Создание пользовательской клавиатуры")
-    buttons = [[KeyboardButton(text="📈 Моя статистика")]]
+    buttons = [
+        [KeyboardButton(text="📈 Моя статистика")],
+        [KeyboardButton(text="❌ Мои ошибки")],
+    ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)

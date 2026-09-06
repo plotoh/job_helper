@@ -222,6 +222,7 @@ class AccountWorker:
             new_done = await state_repo.increment_done(self.account_id, today)
             logger.info(f"Account {self.account_id}: responded to {vacancy.hh_id}, done {new_done}/{state.daily_limit}")
             await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status="success")
+            await vacancy_repo.increment_used_count(vacancy.hh_id)
             self.vacancy_attempts.pop(vacancy.hh_id, None)
         else:
             await error_repo.add(self.account_id, vacancy.hh_id, "Response returned False",

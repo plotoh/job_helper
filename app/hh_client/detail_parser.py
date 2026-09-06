@@ -97,6 +97,21 @@ class HHVacancyDetailParser(IVacancyDetailParser):
                     if skill_text:
                         details["skills"].append(skill_text.strip())
 
+            # # Дата публикации
+            # pub_elem = page.locator('[data-qa="vacancy-published-at"]')
+            # if await pub_elem.count() > 0:
+            #     pub_text: str | None = await pub_elem.text_content()
+            #     if pub_text:
+            #         # Пример: "10 марта 2025" – нужно распарсить
+            #         # Лучше использовать dateparser, но для простоты можно хранить как строку, но лучше datetime
+            #         # Пропустим парсинг, сохраним как есть, или воспользуемся готовым решением.
+            #         # Для демонстрации запишем текущее время, если не удалось распарсить.
+            #         details["published_at"] = pub_text.strip()
+            #     else:
+            #         details["published_at"] = None
+            # else:
+            #     details["published_at"] = None
+
         except Exception as e:
             logger.error(f"Ошибка при парсинге {url}: {e}")
             raise

@@ -2,10 +2,11 @@ import asyncio
 import logging
 import random
 from datetime import datetime, time, timedelta
+from pathlib import Path
 from typing import List
 
 from playwright.async_api import BrowserContext
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.config import settings
@@ -27,15 +28,9 @@ logger = logging.getLogger(__name__)
 
 PARSING_WINDOWS = [
     (9, 0, 10, 0),
-    (11, 0, 11, 30),
-    (12, 0, 12, 30),
     (12, 30, 13, 00),
     (13, 0, 14, 0),
-    (14, 0, 14, 30),
     (15, 0, 16, 0),
-    (16, 12, 16, 53),
-    (17, 0, 17, 50),
-    (18, 0, 20, 0),
     (21, 0, 23, 0),
 ]
 
@@ -124,6 +119,19 @@ class ParsingScheduler:
         start_time = msk_now()
         start_time_naive = start_time.replace(tzinfo=None)
 
+        # --- Проверка дневного лимита ---
+        today_start = start_time.replace(hour=0, minute=0, second=0, microsecond=0).replace(tzinfo=None)
+        async with AsyncSessionLocal() as session:
+            total_today = await session.execute(
+                select(func.sum(ParsingLog.vacancies_found))
+                .where(ParsingLog.started_at >= today_start)
+            )
+            total = total_today.scalar() or 0
+            if total >= settings.DAILY_PARSING_LIMIT:
+                logger.info(f"Daily parsing limit reached ({total} >= {settings.DAILY_PARSING_LIMIT}), skipping window")
+                return
+
+        # Создаём лог-запись
         async with AsyncSessionLocal() as session:
             log_entry = ParsingLog(
                 window_index=window_idx,
@@ -145,6 +153,11 @@ class ParsingScheduler:
             pages_to_do = settings.PAGES_PER_WINDOW
 
             for i in range(1, pages_to_do + 1):
+                # Проверяем лимит перед каждой страницей
+                if total_saved >= settings.DAILY_PARSING_LIMIT:
+                    logger.info(f"Daily limit reached, stopping further pages.")
+                    break
+
                 next_page = progress.last_page + i
                 logger.info(f"Parsing page {next_page} for window {window_idx}")
 
@@ -172,9 +185,11 @@ class ParsingScheduler:
                         rejected.append(vac)
 
                 logger.info(
-                    f"Page {next_page}: regular={len(regular)}, junior={len(junior)}, senior={len(senior)}, rejected={len(rejected)}"
+                    f"Page {next_page}: regular={len(regular)}, junior={len(junior)}, "
+                    f"senior={len(senior)}, rejected={len(rejected)}"
                 )
 
+                # --- Сохраняем rejected в БД и в текстовый файл ---
                 if rejected:
                     async with AsyncSessionLocal() as session:
                         for vac in rejected:
@@ -186,7 +201,15 @@ class ParsingScheduler:
                             ).on_conflict_do_nothing(index_elements=['hh_id'])
                             await session.execute(stmt)
                         await session.commit()
-                    logger.info(f"Saved {len(rejected)} filtered-out vacancies")
+                    # Лог в файл
+                    log_dir = Path(settings.REJECTED_LOGS_DIR)
+                    log_dir.mkdir(exist_ok=True)
+                    today_str = msk_now().strftime("%Y-%m-%d")
+                    log_file = log_dir / f"rejected_{today_str}.txt"
+                    with open(log_file, "a", encoding="utf-8") as f:
+                        for vac in rejected:
+                            f.write(f"{vac['title']} | {vac['url']}\n")
+                    logger.info(f"Appended {len(rejected)} rejected vacancies to {log_file}")
 
                 if junior:
                     async with AsyncSessionLocal() as session:
@@ -212,6 +235,7 @@ class ParsingScheduler:
                         await session.commit()
                     logger.info(f"Saved {len(senior)} senior vacancies")
 
+                # Парсим регулярные вакансии
                 semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT)
 
                 async def parse_one(vac):
@@ -228,21 +252,22 @@ class ParsingScheduler:
                 results = await asyncio.gather(*tasks)
                 successful = [r for r in results if r is not None]
 
+                saved_this_page = 0
                 async with AsyncSessionLocal() as session:
                     repo = VacancyRepository(session)
-                    saved_count = 0
                     for vac in successful:
                         inserted = await repo.save_if_not_exists(vac)
                         if inserted:
-                            saved_count += 1
-                    logger.info(f"Page {next_page}: saved {saved_count} new vacancies")
-                    total_saved += saved_count
+                            saved_this_page += 1
+                    logger.info(f"Page {next_page}: saved {saved_this_page} new vacancies")
+                    total_saved += saved_this_page
 
                 async with AsyncSessionLocal() as session:
                     progress_repo = ParsingProgressRepository(session)
                     await progress_repo.update_last_page(settings.HH_SEARCH_URL, next_page)
                     pages_processed += 1
 
+            # Обновляем лог
             async with AsyncSessionLocal() as session:
                 stmt = select(ParsingLog).where(ParsingLog.id == log_id)
                 result = await session.execute(stmt)

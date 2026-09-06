@@ -13,6 +13,8 @@ from app.scheduler.account_worker import AccountWorker
 from app.scheduler.parsing_scheduler import ParsingScheduler
 from app.scheduler.daily_planner import generate_daily_limit, generate_pauses
 from app.db.repositories.account_state_repo import AccountStateRepository
+from app.db.repositories.vacancy_repo import VacancyRepository
+from app.db.repositories.response_error_repo import ResponseErrorRepository
 from app.utils.time_utils import msk_now, MSK_TZ, msk_today
 
 logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL))
@@ -24,10 +26,11 @@ class Worker:
         self.browser_manager = BrowserManager(headless=settings.PLAYWRIGHT_HEADLESS)
         self.parsing_context = None
         self.account_workers = []
-        self.worker_tasks = []           # храним задачи воркеров аккаунтов
+        self.worker_tasks = []
         self.parsing_scheduler = None
         self.parsing_task = None
         self.daily_planner_task = None
+        self.error_report_task = None
         self.stop_event = asyncio.Event()
         self.template = self._load_template()
 
@@ -42,15 +45,15 @@ class Worker:
         await init_db()
         await self.browser_manager.start()
 
-        # Подготовка прокси для парсинга (если задан)
+        # Подготовка прокси для парсинга (если задан в .env)
         parsing_proxy = None
-        if settings.PARSING_PROXY_SERVER:
-            parsing_proxy = {"server": settings.PARSING_PROXY_SERVER}
-            if settings.PARSING_PROXY_USERNAME:
-                parsing_proxy["username"] = settings.PARSING_PROXY_USERNAME
-            if settings.PARSING_PROXY_PASSWORD:
-                parsing_proxy["password"] = settings.PARSING_PROXY_PASSWORD
-            logger.info(f"Parsing will use proxy {settings.PARSING_PROXY_SERVER}")
+        if settings.PROXY_SERVER:
+            parsing_proxy = {"server": settings.PROXY_SERVER}
+            if settings.PROXY_USERNAME:
+                parsing_proxy["username"] = settings.PROXY_USERNAME
+            if settings.PROXY_PASSWORD:
+                parsing_proxy["password"] = settings.PROXY_PASSWORD
+            logger.info(f"Parsing will use proxy {settings.PROXY_SERVER}")
 
         parsing_cookies = getattr(settings, 'PARSING_COOKIES_FILE', None)
         self.parsing_context = await self.browser_manager.create_context(
@@ -58,11 +61,11 @@ class Worker:
             proxy=parsing_proxy
         )
 
-        # Запускаем планировщик парсинга
+        # Запускаем парсинг
         self.parsing_scheduler = ParsingScheduler(self.parsing_context)
         self.parsing_task = asyncio.create_task(self.parsing_scheduler.run())
 
-        # Загружаем список аккаунтов из БД
+        # Загружаем аккаунты
         async with AsyncSessionLocal() as session:
             result = await session.execute(select(Account))
             accounts = result.scalars().all()
@@ -75,17 +78,15 @@ class Worker:
                     logger.warning(f"Cookies file for account {acc.id} not found at {cookies_file}, skipping")
                     continue
 
-                # Подготовка прокси для аккаунта
+                # Прокси для аккаунта – используем глобальный из .env
                 proxy = None
-                if acc.proxy_server:
-                    proxy = {"server": acc.proxy_server}
-                    if acc.proxy_username:
-                        proxy["username"] = acc.proxy_username
-                    if acc.proxy_password:
-                        proxy["password"] = acc.proxy_password
-                    logger.info(f"Account {acc.id} will use proxy {acc.proxy_server}")
-                else:
-                    logger.info(f"Account {acc.id} will use direct connection (no proxy)")
+                if settings.PROXY_SERVER:
+                    proxy = {"server": settings.PROXY_SERVER}
+                    if settings.PROXY_USERNAME:
+                        proxy["username"] = settings.PROXY_USERNAME
+                    if settings.PROXY_PASSWORD:
+                        proxy["password"] = settings.PROXY_PASSWORD
+                    logger.info(f"Account {acc.id} will use proxy {settings.PROXY_SERVER}")
 
                 context = await self.browser_manager.create_context(
                     cookies_source=str(cookies_file),
@@ -103,10 +104,12 @@ class Worker:
         else:
             logger.info("Responses are DISABLED. No account workers will be started.")
 
-        # Запускаем задачу ежедневного планирования лимитов
+        # Запускаем ежедневный планировщик (лимиты, очистка)
         self.daily_planner_task = asyncio.create_task(self._daily_planner_loop())
 
-        # Ожидаем сигнала остановки
+        # in /bot # Запускаем отправку ошибок в заданное время
+        # self.error_report_task = asyncio.create_task(self._error_report_loop())
+
         await self.stop_event.wait()
         await self.stop()
 
@@ -117,7 +120,6 @@ class Worker:
                 next_run = datetime.combine(msk_today() + timedelta(days=1), time(0, 5)).replace(tzinfo=MSK_TZ)
                 sleep_seconds = (next_run - now).total_seconds()
                 if sleep_seconds > 0:
-                    # Прерываемый сон
                     await self._interruptible_sleep(sleep_seconds)
 
                 logger.info("Generating daily limits and pauses for all accounts")
@@ -128,7 +130,6 @@ class Worker:
                     for acc in accounts:
                         existing = await state_repo.get_for_today(acc.id, today)
                         if existing:
-                            logger.debug(f"Account {acc.id} already has state for today, skipping")
                             continue
                         limit = generate_daily_limit()
                         pauses = generate_pauses()
@@ -140,12 +141,57 @@ class Worker:
                         }
                         await state_repo.create_or_update(acc.id, today, data)
                         logger.info(f"Account {acc.id}: limit={limit}, pauses={pauses}")
+
+                # Очистка устаревших вакансий (раз в сутки)
+                await self._cleanup_old_vacancies()
         except asyncio.CancelledError:
             logger.info("Daily planner loop cancelled")
             raise
 
+    async def _cleanup_old_vacancies(self):
+        logger.info("Cleaning up old vacancies...")
+        async with AsyncSessionLocal() as session:
+            repo = VacancyRepository(session)
+            await repo.deactivate_old_vacancies(settings.VACANCY_TTL_DAYS)
+        logger.info("Cleanup completed.")
+
+    # закоментированно т.к. функционал теперь внутри бота, а не воркера
+    # async def _error_report_loop(self):
+    #     """Цикл отправки ежедневных отчётов об ошибках в заданное время."""
+    #     try:
+    #         while not self.stop_event.is_set():
+    #             now = msk_now()
+    #             target = now.replace(
+    #                 hour=settings.ERROR_REPORT_HOUR,
+    #                 minute=settings.ERROR_REPORT_MINUTE,
+    #                 second=0, microsecond=0
+    #             )
+    #             if now >= target:
+    #                 target += timedelta(days=1)
+    #             sleep_seconds = (target - now).total_seconds()
+    #             logger.info(f"Next error report at {target}")
+    #             await self._interruptible_sleep(sleep_seconds)
+    #             await self._send_error_reports()
+    #     except asyncio.CancelledError:
+    #         logger.info("Error report loop cancelled")
+    #
+    # async def _send_error_reports(self):
+    #     logger.info("Sending daily error reports...")
+    #     async with AsyncSessionLocal() as session:
+    #         accounts = (await session.execute(select(Account))).scalars().all()
+    #         for acc in accounts:
+    #             repo = ResponseErrorRepository(session)
+    #             errors = await repo.get_unreported_errors(acc.id)
+    #             if not errors:
+    #                 continue
+    #             # Отправляем через модуль bot.sender
+    #             await send_error_report(acc.id, errors, acc.tg_username)
+    #             # Помечаем как отправленные
+    #             ids = [e["id"] for e in errors]
+    #             await repo.mark_as_reported(ids)
+    #             await asyncio.sleep(1)
+
     async def _interruptible_sleep(self, seconds: float):
-        """Спит с проверкой stop_event каждые 10 секунд."""
         end_time = asyncio.get_event_loop().time() + seconds
         while not self.stop_event.is_set():
             remaining = end_time - asyncio.get_event_loop().time()
@@ -157,20 +203,19 @@ class Worker:
         logger.info("Stopping worker")
         self.stop_event.set()
 
-        # Останавливаем воркеры аккаунтов
         for w in self.account_workers:
             await w.stop()
 
-        # Останавливаем планировщик парсинга
         if self.parsing_scheduler:
             await self.parsing_scheduler.stop()
 
-        # Отменяем задачи и ждём их завершения
         tasks = []
         if self.parsing_task:
             tasks.append(self.parsing_task)
         if self.daily_planner_task:
             tasks.append(self.daily_planner_task)
+        # if self.error_report_task:
+        #     tasks.append(self.error_report_task)
         tasks.extend(self.worker_tasks)
 
         for task in tasks:

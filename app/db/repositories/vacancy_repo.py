@@ -1,10 +1,14 @@
 import json
 from typing import Optional
-from sqlalchemy import select, func, and_, not_
+from sqlalchemy import select, func, and_, not_, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import settings
 from app.db.models import Vacancy, AccountVacancy
 from app.hh_client.base_interfaces import IVacancyRepository
 import logging
+from datetime import datetime, timedelta
+from sqlalchemy import and_, func, desc
 
 logger = logging.getLogger(__name__)
 
@@ -76,13 +80,59 @@ class VacancyRepository(IVacancyRepository):
             self.session.add(new)
         await self.session.commit()
 
+    # async def get_random_unresponded(self, account_id: int) -> Optional[Vacancy]:
+    #     subquery = select(AccountVacancy.hh_id).where(AccountVacancy.account_id == account_id).scalar_subquery()
+    #     stmt = select(Vacancy).where(
+    #         and_(
+    #             not_(Vacancy.hh_id.in_(subquery)),
+    #             Vacancy.is_actual == True
+    #         )
+    #     ).order_by(func.random()).limit(1)
+    #     result = await self.session.execute(stmt)
+    #     return result.scalar_one_or_none()
+
     async def get_random_unresponded(self, account_id: int) -> Optional[Vacancy]:
         subquery = select(AccountVacancy.hh_id).where(AccountVacancy.account_id == account_id).scalar_subquery()
-        stmt = select(Vacancy).where(
-            and_(
-                not_(Vacancy.hh_id.in_(subquery)),
-                Vacancy.is_actual == True
+        # Используем created_at как дату добавления, считаем её свежестью
+        cutoff = datetime.now() - timedelta(days=settings.VACANCY_TTL_DAYS)
+        stmt = (
+            select(Vacancy)
+            .where(
+                and_(
+                    ~Vacancy.hh_id.in_(subquery),
+                    Vacancy.is_actual == True,
+                    Vacancy.used_count < settings.MAX_USES_PER_VACANCY,
+                    Vacancy.created_at >= cutoff  # не старше N дней
+                )
             )
-        ).order_by(func.random()).limit(1)
+            .order_by(desc(Vacancy.created_at), func.random())  # сначала новые, потом случайные
+            .limit(1)
+        )
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def increment_used_count(self, hh_id: str) -> int:
+        stmt = (
+            update(Vacancy)
+            .where(Vacancy.hh_id == hh_id)
+            .values(used_count=Vacancy.used_count + 1)
+            .returning(Vacancy.used_count)
+        )
+        result = await self.session.execute(stmt)
+        await self.session.commit()
+        return result.scalar_one()
+
+    async def deactivate_old_vacancies(self, days: int):
+        cutoff = datetime.now() - timedelta(days=days)
+        stmt = (
+            update(Vacancy)
+            .where(
+                or_(
+                    Vacancy.created_at < cutoff,
+                    Vacancy.used_count >= settings.MAX_USES_PER_VACANCY
+                )
+            )
+            .values(is_actual=False)
+        )
+        await self.session.execute(stmt)
+        await self.session.commit()
