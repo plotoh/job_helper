@@ -113,6 +113,9 @@ async def daily_error_report(bot_instance: Bot):
 
 
 async def main():
+    if not settings.BOT_ENABLED:
+        logger.info("⛔ Бот отключён через настройку BOT_ENABLED=False. Выход.")
+        return
     logger.info("🚀 Бот запускается...")
     logger.info(f"📋 Admin ID: {ADMIN_ID}")
     logger.info(f"📋 Users IDs: {USERS_IDS}")

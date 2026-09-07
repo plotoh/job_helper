@@ -49,40 +49,41 @@ services:
       PAUSE_COUNT: 3
       PAUSE_MIN_MINUTES: 30
       PAUSE_MAX_MINUTES: 60
-      DAILY_LIMIT_MIN: 53
-      DAILY_LIMIT_MAX: 97
-      LOG_LEVEL: INFO
+      DAILY_LIMIT_MIN: 97
+      DAILY_LIMIT_MAX: 156
+      LOG_LEVEL: DEBUG
     volumes:
       - ./cookies:/app/cookies
 #      - ./message_template.txt:/app/message_template.txt
 
-  bot:
-    dns:
-      - 8.8.8.8
-      - 1.1.1.1
-      - 1.0.0.1
-    build:
-      context: .
-      dockerfile: Dockerfile.bot
-    container_name: hhparser_bot
-    command: python -m app.bot.bot
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      TZ: Europe/Moscow
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_NAME: hhparser
-      DB_USER: user
-      DB_PASSWORD: pass
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
-      TELEGRAM_ADMIN_ID: ${TELEGRAM_ADMIN_ID}
-      TELEGRAM_USERS_IDS: ${TELEGRAM_USERS_IDS}
-      LOG_LEVEL: INFO
-    volumes:
-      - ./cookies:/app/cookies
+#  bot:
+#    dns:
+#      - 8.8.8.8
+#      - 1.1.1.1
+#      - 1.0.0.1
+#    build:
+#      context: .
+#      dockerfile: Dockerfile.bot
+#    container_name: hhparser_bot
+#    command: python -m app.bot.bot
+#    restart: unless-stopped
+#    depends_on:
+#      postgres:
+#        condition: service_healthy
+#    environment:
+#      BOT_ENABLED: ${BOT_ENABLED:-true}
+#      TZ: Europe/Moscow
+#      DB_HOST: postgres
+#      DB_PORT: 5432
+#      DB_NAME: hhparser
+#      DB_USER: user
+#      DB_PASSWORD: pass
+#      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+#      TELEGRAM_ADMIN_ID: ${TELEGRAM_ADMIN_ID}
+#      TELEGRAM_USERS_IDS: ${TELEGRAM_USERS_IDS}
+#      LOG_LEVEL: INFO
+#    volumes:
+#      - ./cookies:/app/cookies
 
 volumes:
   pgdata:

@@ -67,7 +67,9 @@ class Settings(BaseSettings):
     REJECTED_LOGS_DIR: str = "logs"
 
     # Логирование
-    LOG_LEVEL: str = "INFO"
+    LOG_LEVEL: str = "DEBUG"
+
+    BOT_ENABLED: bool = True  # по умолчанию включён
 
     @computed_field
     @property

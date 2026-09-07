@@ -82,14 +82,15 @@ class BrowserManager:
             self.contexts.remove(context)
 
     async def stop(self):
-        """Закрывает все контексты и браузер."""
         for ctx in self.contexts:
-            await ctx.close()
+            try:
+                await ctx.close()
+            except Exception as e:
+                logger.warning(f"Error closing context: {e}")
         if self.browser:
             await self.browser.close()
         if self.playwright:
             await self.playwright.stop()
-        logger.info("Browser stopped")
 
     async def __aenter__(self):
         await self.start()
