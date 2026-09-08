@@ -54,6 +54,76 @@ class ParsingScheduler:
                 break
             await asyncio.sleep(min(remaining, 10))
 
+    async def force_parse(self, pages: int = 3):
+        """
+        Принудительный парсинг вне расписания (без создания лога окна).
+        """
+        logger.info(f"🚀 Принудительный парсинг {pages} страниц")
+        total_saved = 0
+        try:
+            async with AsyncSessionLocal() as session:
+                progress_repo = ParsingProgressRepository(session)
+                progress = await progress_repo.get_or_create(settings.HH_SEARCH_URL)
+                start_page = progress.last_page + 1  # начинаем со следующей страницы за последней сохранённой
+
+            for i in range(pages):
+                page = start_page + i
+                logger.info(f"Принудительный парсинг страницы {page}")
+                vacancies_list = await self.list_parser.fetch_ids(settings.HH_SEARCH_URL, page, self.context)
+                if not vacancies_list:
+                    logger.info(f"Нет вакансий на странице {page}, остановка")
+                    break
+
+                # Категоризация, фильтрация, парсинг – копируем логику из _run_parsing
+                all_vacancies = []
+                for vac in vacancies_list:
+                    category = self.filter_service.categorize(vac['title'])
+                    vac['category'] = category
+                    all_vacancies.append(vac)
+
+                # Отбрасываем rejected
+                to_parse = [v for v in all_vacancies if v['category'] != 'reject']
+                if not to_parse:
+                    continue
+
+                # Парсим детали
+                semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT)
+
+                async def parse_one(vac):
+                    async with semaphore:
+                        try:
+                            details = await self.detail_parser.parse(vac['url'], self.context)
+                            vacancy_data = {**vac, **details}
+                            score = self.scorer.compute(vacancy_data)
+                            vacancy_data['score'] = score
+                            vacancy_data['level'] = vac['category']
+                            return vacancy_data
+                        except Exception as e:
+                            logger.error(f"Ошибка парсинга {vac['id']}: {e}")
+                            return None
+
+                tasks = [parse_one(v) for v in to_parse]
+                results = await asyncio.gather(*tasks)
+                successful = [r for r in results if r is not None]
+
+                # Сохраняем
+                saved = 0
+                async with AsyncSessionLocal() as session:
+                    repo = VacancyRepository(session)
+                    for vac in successful:
+                        inserted = await repo.save_if_not_exists(vac)
+                        if inserted:
+                            saved += 1
+                    # Обновляем прогресс (чтобы в следующий раз начать со следующей страницы)
+                    progress_repo = ParsingProgressRepository(session)
+                    await progress_repo.update_last_page(settings.HH_SEARCH_URL, page)
+                    total_saved += saved
+                logger.info(f"Принудительно: страница {page} сохранено {saved} вакансий")
+
+            logger.info(f"✅ Принудительный парсинг завершён, сохранено {total_saved} вакансий")
+        except Exception as e:
+            logger.exception(f"Ошибка при принудительном парсинге: {e}")
+
     async def run(self):
         try:
             while not self.stop_event.is_set():

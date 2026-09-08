@@ -80,8 +80,7 @@ class Worker:
             force = await get_setting('force_parsing', 'false')
             if force == 'true':
                 logger.info("🚀 Принудительный запуск парсинга по запросу из веб-интерфейса")
-                # Запускаем парсинг для окна 0 (можно адаптировать)
-                await self.parsing_scheduler._run_parsing(0)
+                await self.parsing_scheduler.force_parse(pages=3)  # или сколько угодно
                 await set_setting('force_parsing', 'false')
                 logger.info("✅ Принудительный парсинг завершён, флаг сброшен")
 
