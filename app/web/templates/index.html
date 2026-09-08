@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HH Parser Dashboard</title>
+    <style>
+        body { font-family: sans-serif; background: #f0f2f5; padding: 20px; }
+        .card { background: white; border-radius: 8px; padding: 16px; margin: 10px 0; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .stats { display: flex; flex-wrap: wrap; gap: 20px; }
+        .stat-item { flex: 1; min-width: 150px; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 8px; text-align: left; border-bottom: 1px solid #ddd; }
+        .status-active { color: green; }
+        .status-paused { color: orange; }
+        .status-completed { color: blue; }
+        .status-pending { color: gray; }
+        button { padding: 6px 12px; border: none; border-radius: 4px; cursor: pointer; }
+        .btn-pause { background: #ffc107; }
+        .btn-resume { background: #28a745; color: white; }
+        .btn-danger { background: #dc3545; color: white; }
+        .btn-primary { background: #007bff; color: white; }
+        .btn-success { background: #28a745; color: white; }
+        .btn-warning { background: #ffc107; }
+        .btn-recalc-new { background: #17a2b8; color: white; }
+        .btn-recalc-all { background: #fd7e14; color: white; }
+        .logs { background: #1e1e1e; color: #d4d4d4; padding: 10px; border-radius: 4px; font-family: monospace; max-height: 400px; overflow-y: auto; }
+        .button-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+        .status-badge { font-weight: bold; }
+        .status-enabled { color: green; }
+        .status-disabled { color: red; }
+        .checkbox-group { display: flex; gap: 20px; margin-top: 8px; }
+        .checkbox-group label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+        .checkbox-group input[type="checkbox"] { width: 18px; height: 18px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div style="background: #fff; padding: 10px 20px; border-bottom: 1px solid #ddd; margin-bottom: 20px;">
+        <a href="/" style="font-weight: bold; margin-right: 20px;">📊 Дашборд</a>
+        <a href="/vacancies" style="margin-right: 20px;">📋 Вакансии</a>
+        <a href="/worker-logs" style="margin-right: 20px;">📝 Логи</a>
+    </div>
+    <h1>📊 HH Parser Dashboard</h1>
+    <div class="card stats" id="stats">
+        <div class="stat-item"><strong>Вакансий:</strong> <span id="vacancy-count">0</span></div>
+        <div class="stat-item"><strong>Актуальных:</strong> <span id="vacancy-actual">0</span></div>
+        <div class="stat-item"><strong>Аккаунтов:</strong> <span id="accounts-count">0</span></div>
+        <div class="stat-item"><strong>Откликов сегодня:</strong> <span id="responses-today">0</span></div>
+        <div class="stat-item"><strong>Ошибок сегодня:</strong> <span id="errors-today">0</span></div>
+    </div>
+
+    <div class="card">
+        <h2>👥 Аккаунты</h2>
+        <table id="accounts-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Username</th>
+                    <th>Резюме</th>
+                    <th>Сделано / Лимит</th>
+                    <th>Статус</th>
+                    <th>Действия</th>
+                </tr>
+            </thead>
+            <tbody id="accounts-body">
+                <!-- заполняется JavaScript -->
+            </tbody>
+        </table>
+    </div>
+
+    <div class="card">
+        <h2>⚙️ Управление</h2>
+        <div style="margin-bottom: 8px;">
+            <span id="responses-status-label" class="status-badge">Статус откликов: <span id="responses-status-text" class="status-enabled">включены ✅</span></span>
+        </div>
+        <div class="button-group">
+            <button id="toggle-responses-btn" class="btn-warning" onclick="toggleResponses()">⏸ Отключить отклики</button>
+            <button class="btn-success" onclick="startParsing()">▶ Запустить парсинг сейчас</button>
+        </div>
+        <p style="margin-top:10px; font-size:0.9em; color:#666;">
+            Отключение откликов остановит все новые попытки в течение ~30 секунд. Включение возобновит работу.
+        </p>
+    </div>
+
+    <div class="card">
+        <h2>🎯 Уровни вакансий для отклика</h2>
+        <div class="checkbox-group">
+            <label>
+                <input type="checkbox" id="include-junior" checked onchange="toggleJunior()"> Включать Junior
+            </label>
+            <label>
+                <input type="checkbox" id="include-senior" checked onchange="toggleSenior()"> Включать Senior
+            </label>
+        </div>
+        <p style="margin-top:8px; font-size:0.9em; color:#666;">
+            Если отключить, будут обрабатываться только Regular-вакансии. Изменения вступят в силу в течение минуты.
+        </p>
+    </div>
+
+    <div class="card">
+        <h2>📋 Последние логи</h2>
+        <div class="logs" id="logs-container">
+            <!-- заполняется JavaScript -->
+        </div>
+        <p><a href="/logs">Все логи →</a></p>
+    </div>
+
+    <div class="card">
+        <h2>🔄 Управление скорингом</h2>
+        <div class="button-group">
+            <button onclick="recalcScores(false)" class="btn-recalc-new">
+                🔄 Пересчитать скор для новых вакансий
+            </button>
+            <button onclick="recalcScores(true)" class="btn-recalc-all">
+                🔄 Пересчитать скор для всех вакансий
+            </button>
+        </div>
+        <p style="margin-top:10px; font-size:0.9em; color:#666;">
+            Первая кнопка обновит только вакансии без скора. Вторая – пересчитает скор для всех вакансий (может занять время).
+        </p>
+    </div>
+
+    <script>
+        // --- Управление откликами ---
+        async function updateResponsesUI() {
+            try {
+                const resp = await fetch('/api/settings/responses/status');
+                const data = await resp.json();
+                const btn = document.getElementById('toggle-responses-btn');
+                const statusText = document.getElementById('responses-status-text');
+                if (data.enabled) {
+                    btn.textContent = '⏸ Отключить отклики';
+                    btn.className = 'btn-warning';
+                    statusText.textContent = 'включены ✅';
+                    statusText.className = 'status-enabled';
+                } else {
+                    btn.textContent = '▶ Включить отклики';
+                    btn.className = 'btn-success';
+                    statusText.textContent = 'отключены ⛔';
+                    statusText.className = 'status-disabled';
+                }
+            } catch (e) {
+                console.error('Ошибка получения статуса откликов:', e);
+            }
+        }
+
+        async function toggleResponses() {
+            const btn = document.getElementById('toggle-responses-btn');
+            const isCurrentlyEnabled = btn.textContent.includes('Отключить');
+            const action = isCurrentlyEnabled ? 'disable' : 'enable';
+            try {
+                const resp = await fetch(`/api/settings/responses/${action}`, { method: 'POST' });
+                if (resp.ok) {
+                    await updateResponsesUI();
+                } else {
+                    alert('Ошибка при изменении статуса откликов');
+                }
+            } catch (e) {
+                alert('Ошибка сети: ' + e.message);
+            }
+        }
+
+        // --- Управление уровнями (Junior/Senior) ---
+        async function loadLevelSettings() {
+            try {
+                const jun = await fetch('/api/settings/include-junior').then(r => r.json());
+                document.getElementById('include-junior').checked = jun.enabled;
+                const sen = await fetch('/api/settings/include-senior').then(r => r.json());
+                document.getElementById('include-senior').checked = sen.enabled;
+            } catch(e) {
+                console.error('Ошибка загрузки настроек уровней:', e);
+            }
+        }
+
+        async function toggleJunior() {
+            const checked = document.getElementById('include-junior').checked;
+            await fetch(`/api/settings/include-junior?enabled=${checked}`, { method: 'POST' });
+        }
+
+        async function toggleSenior() {
+            const checked = document.getElementById('include-senior').checked;
+            await fetch(`/api/settings/include-senior?enabled=${checked}`, { method: 'POST' });
+        }
+
+        // --- Принудительный парсинг ---
+        function startParsing() {
+            if (!confirm('Запустить принудительный парсинг прямо сейчас?')) return;
+            fetch('/api/parsing/start', { method: 'POST' })
+                .then(r => r.json())
+                .then(data => alert(data.message || 'Парсинг будет запущен в течение 10 секунд'))
+                .catch(err => alert('Ошибка: ' + err));
+        }
+
+        // --- Пересчёт скора ---
+        function recalcScores(force) {
+            const msg = force
+                ? 'Пересчитать скор для всех вакансий? Это может занять время.'
+                : 'Пересчитать скор только для вакансий без скора?';
+            if (!confirm(msg)) return;
+            const url = force
+                ? '/api/vacancies/recalculate-scores?force=true'
+                : '/api/vacancies/recalculate-scores';
+            fetch(url, { method: 'POST' })
+                .then(r => r.json())
+                .then(data => alert(data.message || 'Готово'))
+                .catch(err => alert('Ошибка: ' + err));
+        }
+
+        // --- Автообновление данных ---
+        function refreshData() {
+            fetch('/api/stats')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('vacancy-count').textContent = data.vacancies_total;
+                    document.getElementById('vacancy-actual').textContent = data.vacancies_actual;
+                    document.getElementById('accounts-count').textContent = data.accounts_total;
+                    document.getElementById('responses-today').textContent = data.responses_today;
+                    document.getElementById('errors-today').textContent = data.errors_today;
+
+                    const tbody = document.getElementById('accounts-body');
+                    tbody.innerHTML = '';
+                    data.accounts.forEach(acc => {
+                        const tr = document.createElement('tr');
+                        const statusClass = `status-${acc.status}`;
+                        const pauseInfo = acc.pause_until ? `до ${new Date(acc.pause_until).toLocaleString()}` : '';
+                        tr.innerHTML = `
+                            <td><a href="/accounts/${acc.id}">${acc.id}</a></td>
+                            <td>${acc.username}</td>
+                            <td>${acc.resume_id}</td>
+                            <td>${acc.done} / ${acc.limit}</td>
+                            <td class="${statusClass}">${acc.status} ${pauseInfo}</td>
+                            <td>
+                                <button class="btn-pause" onclick="setPause(${acc.id})">⏸ Пауза (30 мин)</button>
+                                <button class="btn-resume" onclick="resume(${acc.id})">▶ Возобновить</button>
+                            </td>
+                        `;
+                        tbody.appendChild(tr);
+                    });
+                })
+                .catch(err => console.error('Ошибка обновления:', err));
+
+            // Логи
+            fetch('/logs?format=json')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.logs) {
+                        const container = document.getElementById('logs-container');
+                        container.textContent = data.logs.slice(-10).join('\n');
+                    }
+                })
+                .catch(() => {});
+        }
+
+        // --- Пауза/возобновление аккаунта ---
+        function setPause(accountId) {
+            const duration = prompt('Введите длительность паузы в минутах (оставьте пустым для бессрочной):', '30');
+            if (duration === null) return;
+            const minutes = duration.trim() === '' ? null : parseInt(duration);
+            if (minutes !== null && isNaN(minutes)) {
+                alert('Введите число или оставьте пустым');
+                return;
+            }
+            fetch(`/api/accounts/${accountId}/pause`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ duration_minutes: minutes })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'ok') {
+                    alert('Пауза установлена до ' + new Date(data.pause_until).toLocaleString());
+                    refreshData();
+                } else {
+                    alert('Ошибка: ' + JSON.stringify(data));
+                }
+            })
+            .catch(err => alert('Ошибка запроса: ' + err));
+        }
+
+        function resume(accountId) {
+            if (!confirm('Возобновить работу аккаунта?')) return;
+            fetch(`/api/accounts/${accountId}/resume`, { method: 'POST' })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status === 'ok') {
+                        refreshData();
+                    } else {
+                        alert('Ошибка: ' + JSON.stringify(data));
+                    }
+                })
+                .catch(err => alert('Ошибка запроса: ' + err));
+        }
+
+        // --- Инициализация ---
+        refreshData();
+        setInterval(refreshData, 15000);
+        updateResponsesUI();
+        loadLevelSettings();
+    </script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Логи откликов</title>
+    <style>
+        body { background: #1e1e1e; color: #d4d4d4; font-family: monospace; padding: 20px; }
+        pre { white-space: pre-wrap; word-wrap: break-word; }
+        a { color: #4fc3f7; }
+    </style>
+</head>
+<body>
+    <h1>📋 Логи откликов</h1>
+    <pre>
+        {%- for line in logs -%}
+            {{ line }}
+        {%- endfor -%}
+    </pre>
+    <p><a href="/">← На главную</a></p>
+</body>
+</html>

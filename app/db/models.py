@@ -1,13 +1,19 @@
 # app/db/models.py
 
 from sqlalchemy import Column, String, Integer, Boolean, DateTime, ForeignKey, JSON, Date, Enum, UniqueConstraint, \
-    BigInteger
+    BigInteger, Text
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.sql import func
 import json
 import enum
 
 Base = declarative_base()
+
+
+class VacancyLevel(str, enum.Enum):
+    REGULAR = 'regular'
+    JUNIOR = 'JUNIOR'
+    SENIOR = 'SENIOR'
 
 
 class Vacancy(Base):
@@ -23,8 +29,14 @@ class Vacancy(Base):
     skills = Column(JSON, nullable=True)  # список навыков в JSON
     created_at = Column(DateTime, server_default=func.now())
     is_actual = Column(Boolean, nullable=False, server_default='true')  # или default=True
-    used_count = Column(Integer, default=0)          # сколько аккаунтов уже откликнулось
-
+    used_count = Column(Integer, default=0)  # сколько аккаунтов уже откликнулось
+    description = Column(Text, nullable=True)  # полное описание вакансии
+    score = Column(Integer, default=0)
+    level = Column(
+        Enum(VacancyLevel, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+        default=VacancyLevel.REGULAR
+    )
 
 class Account(Base):
     __tablename__ = 'accounts'
@@ -56,8 +68,8 @@ class ResponseError(Base):
     error_text = Column(String, nullable=False)
     error_type = Column(String, nullable=True)  # можно хранить тип: 'network', 'auth', 'response_failed' и т.п.
     created_at = Column(DateTime, server_default=func.now())
-    reported = Column(Boolean, default=False)        # отправлено ли пользователю
-    reported_at = Column(DateTime, nullable=True)    # когда отправлено
+    reported = Column(Boolean, default=False)  # отправлено ли пользователю
+    reported_at = Column(DateTime, nullable=True)  # когда отправлено
 
 
 class AccountDailyState(Base):
@@ -119,6 +131,9 @@ class JuniorVacancy(Base):
     title = Column(String, nullable=False)
     url = Column(String, nullable=False)
     created_at = Column(DateTime, server_default=func.now())
+    score = Column(Integer, default=0)  # <-- добавить
+    is_actual = Column(Boolean, default=True)  # <-- добавить
+    used_count = Column(Integer, default=0)  # <-- добавить
 
 
 class SeniorVacancy(Base):
@@ -128,3 +143,13 @@ class SeniorVacancy(Base):
     title = Column(String, nullable=False)
     url = Column(String, nullable=False)
     created_at = Column(DateTime, server_default=func.now())
+
+    score = Column(Integer, default=0)  # <-- добавить
+    is_actual = Column(Boolean, default=True)  # <-- добавить
+    used_count = Column(Integer, default=0)  # <-- добавить
+
+
+class Setting(Base):
+    __tablename__ = 'settings'
+    key = Column(String, primary_key=True)
+    value = Column(String)

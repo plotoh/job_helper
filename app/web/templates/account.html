@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Аккаунт {{ account.id }}</title>
+    <style>
+        body { font-family: sans-serif; background: #f0f2f5; padding: 20px; }
+        .card { background: white; border-radius: 8px; padding: 16px; margin: 10px 0; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 8px; text-align: left; border-bottom: 1px solid #ddd; }
+        .status-active { color: green; }
+        .status-paused { color: orange; }
+        .status-completed { color: blue; }
+        .status-pending { color: gray; }
+    </style>
+</head>
+<body>
+    <h1>👤 Аккаунт {{ account.id }}</h1>
+    <div class="card">
+        <p><strong>Username:</strong> @{{ account.tg_username }}</p>
+        <p><strong>Резюме:</strong> {{ account.resume_id }}</p>
+        <p><strong>Состояние на сегодня:</strong>
+            {% if state %}
+                Сделано: {{ state.done_count }} / {{ state.daily_limit }},
+                Статус: <span class="status-{{ state.status }}">{{ state.status }}</span>
+                {% if state.pause_until %} (пауза до {{ state.pause_until }}){% endif %}
+            {% else %}
+                Нет данных
+            {% endif %}
+        </p>
+    </div>
+
+    <div class="card">
+        <h2>📌 Последние отклики</h2>
+        <table>
+            <thead><tr><th>Дата</th><th>Вакансия</th><th>Статус</th></tr></thead>
+            <tbody>
+                {% for resp in responses %}
+                <tr>
+                    <td>{{ resp.response_date }}</td>
+                    <td>{{ resp.hh_id }}</td>
+                    <td>{{ resp.response_status }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="card">
+        <h2>❌ Ошибки</h2>
+        <table>
+            <thead><tr><th>Дата</th><th>Тип</th><th>Текст</th></tr></thead>
+            <tbody>
+                {% for err in errors %}
+                <tr>
+                    <td>{{ err.created_at }}</td>
+                    <td>{{ err.error_type }}</td>
+                    <td>{{ err.error_text }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <p><a href="/">← На главную</a></p>
+</body>
+</html>

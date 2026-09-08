@@ -3,6 +3,7 @@ import logging
 import signal
 from datetime import datetime, timedelta, time
 from pathlib import Path
+from logging.handlers import RotatingFileHandler
 
 from sqlalchemy import select
 
@@ -15,10 +16,42 @@ from app.scheduler.daily_planner import generate_daily_limit, generate_pauses
 from app.db.repositories.account_state_repo import AccountStateRepository
 from app.db.repositories.vacancy_repo import VacancyRepository
 from app.db.repositories.response_error_repo import ResponseErrorRepository
+from app.utils.settings_utils import get_setting, set_setting
 from app.utils.time_utils import msk_now, MSK_TZ, msk_today
 
-logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL))
-logger = logging.getLogger(__name__)
+
+def setup_logging():
+    """Настраивает логирование: stdout + файл logs/worker.log с ротацией."""
+    log_level = getattr(logging, settings.LOG_LEVEL, logging.INFO)
+    log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+
+    root_logger = logging.getLogger()
+    # Удаляем старые хендлеры, чтобы не дублировать
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
+    # Консольный хендлер
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(logging.Formatter(log_format))
+    root_logger.addHandler(console_handler)
+
+    # Файловый хендлер с ротацией
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    file_handler = RotatingFileHandler(
+        "logs/worker.log",
+        maxBytes=10 * 1024 * 1024,  # 10 MB
+        backupCount=5,
+        encoding='utf-8'
+    )
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(logging.Formatter(log_format))
+    root_logger.addHandler(file_handler)
+
+    root_logger.setLevel(log_level)
+    logger = logging.getLogger(__name__)
+    logger.info("Логирование настроено: stdout + logs/worker.log (ротация 10MB, 5 файлов)")
 
 
 class Worker:
@@ -40,12 +73,24 @@ class Worker:
             raise FileNotFoundError(f"Template file {template_path} not found")
         return template_path.read_text(encoding='utf-8')
 
+    async def _check_force_parsing(self):
+        logger = logging.getLogger(__name__)
+        while not self.stop_event.is_set():
+            await asyncio.sleep(10)
+            force = await get_setting('force_parsing', 'false')
+            if force == 'true':
+                logger.info("🚀 Принудительный запуск парсинга по запросу из веб-интерфейса")
+                # Запускаем парсинг для окна 0 (можно адаптировать)
+                await self.parsing_scheduler._run_parsing(0)
+                await set_setting('force_parsing', 'false')
+                logger.info("✅ Принудительный парсинг завершён, флаг сброшен")
+
     async def start(self):
+        logger = logging.getLogger(__name__)
         logger.info("Starting worker")
         await init_db()
         await self.browser_manager.start()
 
-        # Подготовка прокси для парсинга (если задан в .env)
         parsing_proxy = None
         if settings.PROXY_SERVER:
             parsing_proxy = {"server": settings.PROXY_SERVER}
@@ -61,11 +106,11 @@ class Worker:
             proxy=parsing_proxy
         )
 
-        # Запускаем парсинг
         self.parsing_scheduler = ParsingScheduler(self.parsing_context)
         self.parsing_task = asyncio.create_task(self.parsing_scheduler.run())
 
-        # Загружаем аккаунты
+        self.force_parsing_task = asyncio.create_task(self._check_force_parsing())
+
         async with AsyncSessionLocal() as session:
             result = await session.execute(select(Account))
             accounts = result.scalars().all()
@@ -78,7 +123,6 @@ class Worker:
                     logger.warning(f"Cookies file for account {acc.id} not found at {cookies_file}, skipping")
                     continue
 
-                # Прокси для аккаунта – используем глобальный из .env
                 proxy = None
                 if settings.PROXY_SERVER:
                     proxy = {"server": settings.PROXY_SERVER}
@@ -104,16 +148,13 @@ class Worker:
         else:
             logger.info("Responses are DISABLED. No account workers will be started.")
 
-        # Запускаем ежедневный планировщик (лимиты, очистка)
         self.daily_planner_task = asyncio.create_task(self._daily_planner_loop())
-
-        # in /bot # Запускаем отправку ошибок в заданное время
-        # self.error_report_task = asyncio.create_task(self._error_report_loop())
 
         await self.stop_event.wait()
         await self.stop()
 
     async def _daily_planner_loop(self):
+        logger = logging.getLogger(__name__)
         try:
             while not self.stop_event.is_set():
                 now = msk_now()
@@ -142,54 +183,18 @@ class Worker:
                         await state_repo.create_or_update(acc.id, today, data)
                         logger.info(f"Account {acc.id}: limit={limit}, pauses={pauses}")
 
-                # Очистка устаревших вакансий (раз в сутки)
                 await self._cleanup_old_vacancies()
         except asyncio.CancelledError:
             logger.info("Daily planner loop cancelled")
             raise
 
     async def _cleanup_old_vacancies(self):
+        logger = logging.getLogger(__name__)
         logger.info("Cleaning up old vacancies...")
         async with AsyncSessionLocal() as session:
             repo = VacancyRepository(session)
             await repo.deactivate_old_vacancies(settings.VACANCY_TTL_DAYS)
         logger.info("Cleanup completed.")
-
-    # закоментированно т.к. функционал теперь внутри бота, а не воркера
-    # async def _error_report_loop(self):
-    #     """Цикл отправки ежедневных отчётов об ошибках в заданное время."""
-    #     try:
-    #         while not self.stop_event.is_set():
-    #             now = msk_now()
-    #             target = now.replace(
-    #                 hour=settings.ERROR_REPORT_HOUR,
-    #                 minute=settings.ERROR_REPORT_MINUTE,
-    #                 second=0, microsecond=0
-    #             )
-    #             if now >= target:
-    #                 target += timedelta(days=1)
-    #             sleep_seconds = (target - now).total_seconds()
-    #             logger.info(f"Next error report at {target}")
-    #             await self._interruptible_sleep(sleep_seconds)
-    #             await self._send_error_reports()
-    #     except asyncio.CancelledError:
-    #         logger.info("Error report loop cancelled")
-    #
-    # async def _send_error_reports(self):
-    #     logger.info("Sending daily error reports...")
-    #     async with AsyncSessionLocal() as session:
-    #         accounts = (await session.execute(select(Account))).scalars().all()
-    #         for acc in accounts:
-    #             repo = ResponseErrorRepository(session)
-    #             errors = await repo.get_unreported_errors(acc.id)
-    #             if not errors:
-    #                 continue
-    #             # Отправляем через модуль bot.sender
-    #             await send_error_report(acc.id, errors, acc.tg_username)
-    #             # Помечаем как отправленные
-    #             ids = [e["id"] for e in errors]
-    #             await repo.mark_as_reported(ids)
-    #             await asyncio.sleep(1)
 
     async def _interruptible_sleep(self, seconds: float):
         end_time = asyncio.get_event_loop().time() + seconds
@@ -200,6 +205,7 @@ class Worker:
             await asyncio.sleep(min(remaining, 10))
 
     async def stop(self):
+        logger = logging.getLogger(__name__)
         logger.info("Stopping worker")
         self.stop_event.set()
 
@@ -214,8 +220,6 @@ class Worker:
             tasks.append(self.parsing_task)
         if self.daily_planner_task:
             tasks.append(self.daily_planner_task)
-        # if self.error_report_task:
-        #     tasks.append(self.error_report_task)
         tasks.extend(self.worker_tasks)
 
         for task in tasks:
@@ -228,6 +232,7 @@ class Worker:
 
 
 async def main():
+    setup_logging()  # <-- Инициализируем логирование при запуске
     worker = Worker()
     loop = asyncio.get_running_loop()
 

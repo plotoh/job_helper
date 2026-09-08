@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Вакансии</title>
+    <style>
+        body { font-family: sans-serif; background: #f0f2f5; padding: 20px; }
+        .container { max-width: 1400px; margin: 0 auto; }
+        .card { background: white; border-radius: 8px; padding: 16px; margin: 10px 0; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { cursor: pointer; background: #f8f9fa; }
+        th:hover { background: #e9ecef; }
+        .sort-arrow { margin-left: 5px; }
+        .status-active { color: green; font-weight: bold; }
+        .status-inactive { color: gray; }
+        .pagination { display: flex; justify-content: center; gap: 10px; margin-top: 20px; }
+        .pagination a, .pagination span { padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; text-decoration: none; }
+        .pagination .active { background: #007bff; color: white; }
+        .filters { margin-bottom: 20px; }
+        .filters select, .filters input { padding: 6px; border-radius: 4px; border: 1px solid #ccc; }
+        .filters button { padding: 6px 12px; border: none; border-radius: 4px; background: #007bff; color: white; cursor: pointer; }
+        .badge { background: #6c757d; color: white; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; }
+        .badge-success { background: #28a745; }
+        .badge-warning { background: #ffc107; }
+        .badge-danger { background: #dc3545; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>📋 Вакансии</h1>
+    <div class="card">
+        <div class="filters">
+            <label>Статус:
+                <select id="statusFilter">
+                    <option value="all">Все</option>
+                    <option value="actual">Актуальные</option>
+                    <option value="not_actual">Неактуальные</option>
+                </select>
+            </label>
+            <button onclick="applyFilters()">Применить</button>
+            <a href="/" style="margin-left: 20px;">← На главную</a>
+        </div>
+        <table id="vacancies-table">
+            <thead>
+            <tr>
+                <th data-sort="hh_id">ID</th>
+                <th data-sort="title">Название</th>
+                <th data-sort="score">Скор</th>
+                <th data-sort="used_count">Использований</th>
+                <th data-sort="is_actual">Статус</th>
+                <th data-sort="created_at">Дата парсинга</th>
+                <th>Ссылка</th>
+            </tr>
+            </thead>
+            <tbody id="vacancies-body">
+            <tr>
+                <td colspan="7">Загрузка...</td>
+            </tr>
+            </tbody>
+        </table>
+        <div class="pagination" id="pagination"></div>
+    </div>
+</div>
+
+<script>
+    let currentPage = 1;
+    let currentSort = 'created_at';
+    let currentOrder = 'desc';
+    let currentStatus = 'all';
+
+    function loadVacancies() {
+        const params = new URLSearchParams({
+            page: currentPage,
+            per_page: 50,
+            sort_by: currentSort,
+            order: currentOrder,
+            status: currentStatus
+        });
+        fetch(`/api/vacancies?${params}`)
+            .then(response => response.json())
+            .then(data => {
+                const tbody = document.getElementById('vacancies-body');
+                if (data.items.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="7">Нет вакансий</td></tr>';
+                } else {
+                    tbody.innerHTML = data.items.map(v => `
+                        <tr>
+                            <td>${v.hh_id}</td>
+                            <td><a href="${v.url}" target="_blank">${v.title}</a></td>
+                            <td>${v.score || 0}</td>
+                            <td>${v.used_count}</td>
+                            <td class="${v.is_actual ? 'status-active' : 'status-inactive'}">${v.is_actual ? '✅ Актуальна' : '❌ Неактуальна'}</td>
+                            <td>${v.created_at ? new Date(v.created_at).toLocaleDateString() : '-'}</td>
+                            <td><a href="${v.url}" target="_blank">🔗</a></td>
+                        </tr>
+                    `).join('');
+                }
+
+                // Пагинация
+                const pagination = document.getElementById('pagination');
+                let pagesHtml = '';
+                for (let i = 1; i <= data.pages; i++) {
+                    if (i === data.page) {
+                        pagesHtml += `<span class="active">${i}</span>`;
+                    } else {
+                        pagesHtml += `<a href="#" onclick="goToPage(${i}); return false;">${i}</a>`;
+                    }
+                }
+                pagination.innerHTML = pagesHtml;
+            })
+            .catch(err => console.error('Ошибка загрузки:', err));
+    }
+
+    function goToPage(page) {
+        currentPage = page;
+        loadVacancies();
+    }
+
+    function applyFilters() {
+        currentStatus = document.getElementById('statusFilter').value;
+        currentPage = 1;
+        loadVacancies();
+    }
+
+    // Сортировка по клику на заголовок
+    document.querySelectorAll('#vacancies-table th[data-sort]').forEach(th => {
+        th.addEventListener('click', function() {
+            const sort = this.dataset.sort;
+            if (currentSort === sort) {
+                currentOrder = currentOrder === 'asc' ? 'desc' : 'asc';
+            } else {
+                currentSort = sort;
+                currentOrder = 'asc';
+            }
+            currentPage = 1;
+            loadVacancies();
+        });
+    });
+
+    // Загружаем при старте
+    loadVacancies();
+</script>
+<div class="card">
+    <h2>🔄 Управление скорингом</h2>
+    <div class="button-group">
+        <button onclick="recalcScores(false)" class="btn-recalc-new">
+            🔄 Пересчитать скор для новых вакансий
+        </button>
+        <button onclick="recalcScores(true)" class="btn-recalc-all">
+            🔄 Пересчитать скор для всех вакансий
+        </button>
+    </div>
+    <p style="margin-top:10px; font-size:0.9em; color:#666;">
+        Первая кнопка обновит только вакансии без скора. Вторая – пересчитает скор для всех вакансий (может занять
+        время).
+    </p>
+</div>
+
+<script>
+    function recalcScores(force) {
+        const msg = force
+            ? 'Пересчитать скор для всех вакансий? Это может занять время.'
+            : 'Пересчитать скор только для вакансий без скора?';
+        if (!confirm(msg)) return;
+        const url = force
+            ? '/api/vacancies/recalculate-scores?force=true'
+            : '/api/vacancies/recalculate-scores';
+        fetch(url, { method: 'POST' })
+            .then(r => r.json())
+            .then(data => alert(data.message || 'Готово'))
+            .catch(err => alert('Ошибка: ' + err));
+    }
+</script>
+</body>
+</html>

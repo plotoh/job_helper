@@ -97,6 +97,13 @@ class HHVacancyDetailParser(IVacancyDetailParser):
                     if skill_text:
                         details["skills"].append(skill_text.strip())
 
+            # в конце блока парсинга, перед возвратом:
+            desc_elem = page.locator('[data-qa="vacancy-description"]')
+            if await desc_elem.count() > 0:
+                description = await desc_elem.text_content()
+                details["description"] = description.strip() if description else None
+            else:
+                details["description"] = None
             # # Дата публикации
             # pub_elem = page.locator('[data-qa="vacancy-published-at"]')
             # if await pub_elem.count() > 0:

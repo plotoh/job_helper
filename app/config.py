@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     # Параметры рабочего дня и пауз
     WORK_START_HOUR: int = 9
     WORK_START_MINUTE: int = 13
-    WORK_END_HOUR: int = 18
+    WORK_END_HOUR: int = 17
     WORK_END_MINUTE: int = 41
     PAUSE_COUNT: int = 3
     PAUSE_MIN_MINUTES: int = 30

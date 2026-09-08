@@ -48,8 +48,10 @@ class VacancyRepository(IVacancyRepository):
             experience_min=exp_min,
             experience_max=exp_max,
             work_format=vacancy.get('work_format'),
+            score=vacancy.get('score', 0),
             skills=skills_json,
-            is_actual=True
+            is_actual=True,
+            level=vacancy.get('level', 'regular'),
         )
         self.session.add(new_vac)
         await self.session.commit()
@@ -90,11 +92,11 @@ class VacancyRepository(IVacancyRepository):
     #     ).order_by(func.random()).limit(1)
     #     result = await self.session.execute(stmt)
     #     return result.scalar_one_or_none()
-
-    async def get_random_unresponded(self, account_id: int) -> Optional[Vacancy]:
+    async def get_random_unresponded(self, account_id: int, include_junior: bool, include_senior: bool) -> Optional[
+        Vacancy]:
         subquery = select(AccountVacancy.hh_id).where(AccountVacancy.account_id == account_id).scalar_subquery()
-        # Используем created_at как дату добавления, считаем её свежестью
         cutoff = datetime.now() - timedelta(days=settings.VACANCY_TTL_DAYS)
+
         stmt = (
             select(Vacancy)
             .where(
@@ -102,14 +104,40 @@ class VacancyRepository(IVacancyRepository):
                     ~Vacancy.hh_id.in_(subquery),
                     Vacancy.is_actual == True,
                     Vacancy.used_count < settings.MAX_USES_PER_VACANCY,
-                    Vacancy.created_at >= cutoff  # не старше N дней
+                    Vacancy.created_at >= cutoff
                 )
             )
-            .order_by(desc(Vacancy.created_at), func.random())  # сначала новые, потом случайные
-            .limit(1)
         )
+        # Фильтр по уровню
+        allowed_levels = ['regular']
+        if include_junior:
+            allowed_levels.append('junior')
+        if include_senior:
+            allowed_levels.append('senior')
+        stmt = stmt.where(Vacancy.level.in_(allowed_levels))
+
+        stmt = stmt.order_by(desc(Vacancy.score), desc(Vacancy.created_at)).limit(1)
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
+
+    # async def get_random_unresponded(self, account_id: int) -> Optional[Vacancy]:
+    #     subquery = select(AccountVacancy.hh_id).where(AccountVacancy.account_id == account_id).scalar_subquery()
+    #     # Используем created_at как дату добавления, считаем её свежестью
+    #     cutoff = datetime.now() - timedelta(days=settings.VACANCY_TTL_DAYS)
+    #     stmt = (
+    #         select(Vacancy)
+    #         .where(
+    #             and_(
+    #                 ~Vacancy.hh_id.in_(subquery),
+    #                 Vacancy.is_actual == True,
+    #                 Vacancy.used_count < settings.MAX_USES_PER_VACANCY,
+    #                 Vacancy.created_at >= cutoff  # не старше N дней
+    #             )
+    #         )
+    #         .order_by(desc(Vacancy.score), desc(Vacancy.created_at))            .limit(1)
+    #     )
+    #     result = await self.session.execute(stmt)
+    #     return result.scalar_one_or_none()
 
     async def increment_used_count(self, hh_id: str) -> int:
         stmt = (

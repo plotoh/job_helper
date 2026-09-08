@@ -5,6 +5,8 @@ from datetime import datetime, time, timedelta
 from typing import Optional
 import os
 from pathlib import Path
+
+from app.utils.settings_utils import get_setting, get_include_junior, get_include_senior
 from app.utils.time_utils import msk_now
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -153,6 +155,12 @@ class AccountWorker:
                     logger.debug(f"Account {self.account_id}: waiting {interval:.1f}s before next response")
                     await self._interruptible_sleep(interval)
 
+                    responses_enabled = await get_setting('responses_enabled', 'true')
+                    if responses_enabled != 'true':
+                        logger.debug(f"Account {self.account_id}: глобальные отклики отключены, спим 30 сек")
+                        await self._interruptible_sleep(30)
+                        continue
+
                     # Выполняем отклик
                     await self._do_response(session, state, today)
 
@@ -178,24 +186,32 @@ class AccountWorker:
             return min(future_starts)
         return None
 
-    async def _log_response(self, vacancy_id: str, title: str, status: str, error_text: str = ""):
-        """Логирует результат отклика в файл logs/responses/responses_YYYY-MM-DD.txt"""
+    async def _log_response(self, vacancy_id: str, title: str, url: str, status: str, error_text: str = ""):
+        """Логирует результат отклика в файлы logs/responses/responses_YYYY-MM-DD.txt и (если тест) logs/tests/tests_YYYY-MM-DD.txt"""
+        logger.debug(f"🪵 Логирование отклика: {vacancy_id} -> {status}")
+        timestamp = msk_now().strftime("%Y-%m-%d %H:%M:%S")
+        emoji = {"success": "✅", "wo_soprovod": "⚠️", "failed": "❌", "test_required": "🧪"}.get(status, "❓")
+
+        # --- Общий лог (все статусы) ---
         log_dir = Path("logs/responses")
         log_dir.mkdir(parents=True, exist_ok=True)
         today_str = msk_now().strftime("%Y-%m-%d")
         log_file = log_dir / f"responses_{today_str}.txt"
-
-        timestamp = msk_now().strftime("%Y-%m-%d %H:%M:%S")
-        # Эмодзи для статуса
-        emoji = {"success": "✅", "wo_soporovod": "⚠️", "failed": "❌"}.get(status, "❓")
-        line = f"[{timestamp}] {emoji} Account {self.account_id} | Vacancy {vacancy_id} - {title} | Статус: {status}"
+        line = f"[{timestamp}] {emoji} Account {self.account_id} | Vacancy {vacancy_id} - {title} | Ссылка: {url} | Статус: {status}"
         if error_text:
             line += f" | Ошибка: {error_text}"
         line += "\n"
 
-        # Асинхронная запись в файл (используем run_in_executor, чтобы не блокировать)
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._write_log, log_file, line)
+
+        # --- Отдельный лог для тестов ---
+        if status == 'test_required':
+            test_dir = Path("logs/tests")
+            test_dir.mkdir(parents=True, exist_ok=True)
+            test_file = test_dir / f"tests_{today_str}.txt"
+            test_line = f"[{timestamp}] 🧪 Account {self.account_id} | Vacancy {vacancy_id} - {title} | Ссылка: {url} | Требуется тест\n"
+            await loop.run_in_executor(None, self._write_log, test_file, test_line)
 
     def _write_log(self, log_file: Path, line: str):
         with open(log_file, "a", encoding="utf-8") as f:
@@ -206,7 +222,9 @@ class AccountWorker:
         error_repo = ResponseErrorRepository(session)
         state_repo = AccountStateRepository(session)
 
-        vacancy = await vacancy_repo.get_random_unresponded(self.account_id)
+        include_junior = await get_include_junior()
+        include_senior = await get_include_senior()
+        vacancy = await vacancy_repo.get_random_unresponded(self.account_id, include_junior, include_senior)
         if not vacancy:
             self.consecutive_failures += 1
             if self.consecutive_failures >= 5:
@@ -228,46 +246,141 @@ class AccountWorker:
         }
         message = generate_message(self.template, context)
 
-        try:
-            response_status = await self.response_service.respond_to_vacancy(
-                vacancy.url, self.resume_id, message, self.context
-            )
-        except Exception as e:
-            logger.exception(f"Account {self.account_id}: exception during response")
-            await error_repo.add(self.account_id, vacancy.hh_id, str(e), error_type='exception')
-            # Помечаем как failed, чтобы не повторять
-            await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status="failed")
-            await self._log_response(vacancy.hh_id, vacancy.title, 'failed', str(e))
-            return
+        # Счётчик попыток для детекта теста
+        attempt_count = 0
+        max_attempts = 2  # после двух неудач с "кнопка отправки не найдена" считаем тестом
 
-        # Обработка статусов
-        if response_status == 'success':
-            new_done = await state_repo.increment_done(self.account_id, today)
-            logger.info(
-                f"Account {self.account_id}: ✅ отклик с письмом на {vacancy.hh_id}, done {new_done}/{state.daily_limit}")
-            await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status="success")
-            await vacancy_repo.increment_used_count(vacancy.hh_id)
-            self.vacancy_attempts.pop(vacancy.hh_id, None)
-            await self._log_response(vacancy.hh_id, vacancy.title, 'success')
-
-        elif response_status == 'wo_soporovod':
-            new_done = await state_repo.increment_done(self.account_id, today)
-            logger.info(
-                f"Account {self.account_id}: ⚠️ отклик без письма на {vacancy.hh_id}, done {new_done}/{state.daily_limit}")
-            await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status="wo_soporovod")
-            await vacancy_repo.increment_used_count(vacancy.hh_id)
-            self.vacancy_attempts.pop(vacancy.hh_id, None)
-            await self._log_response(vacancy.hh_id, vacancy.title, 'wo_soporovod')
-
-        else:  # 'failed'
-            await error_repo.add(self.account_id, vacancy.hh_id, "Response returned failed",
-                                 error_type='response_failed')
-            attempts = self.vacancy_attempts.get(vacancy.hh_id, 0) + 1
-            self.vacancy_attempts[vacancy.hh_id] = attempts
-            if attempts >= 3:
-                logger.warning(f"Account {self.account_id}: vacancy {vacancy.hh_id} failed 3 times, marking as failed.")
+        while attempt_count < max_attempts:
+            try:
+                response_status = await self.response_service.respond_to_vacancy(
+                    vacancy.url, self.resume_id, message, self.context
+                )
+            except Exception as e:
+                logger.exception(f"Account {self.account_id}: exception during response")
+                await error_repo.add(self.account_id, vacancy.hh_id, str(e), error_type='exception')
                 await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status="failed")
-            await self._log_response(vacancy.hh_id, vacancy.title, 'failed', 'response failed')
+                await self._log_response(vacancy.hh_id, vacancy.title, vacancy.url, 'failed', str(e))
+                return
+
+            # Если успех (с письмом или без) – выходим
+            if response_status in ('success', 'wo_soprovod'):
+                new_done = await state_repo.increment_done(self.account_id, today)
+                logger.info(
+                    f"Account {self.account_id}: {'✅ отклик с письмом' if response_status == 'success' else '⚠️ отклик без письма'} на {vacancy.hh_id}, done {new_done}/{state.daily_limit}"
+                )
+                await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status=response_status)
+                await vacancy_repo.increment_used_count(vacancy.hh_id)
+                self.vacancy_attempts.pop(vacancy.hh_id, None)
+                await self._log_response(vacancy.hh_id, vacancy.title, vacancy.url, response_status)
+                return
+
+            # Если вернулся 'failed', но письмо было вставлено и кнопка не найдена – возможно тест
+            if response_status == 'failed':
+                attempt_count += 1
+                logger.debug(
+                    f"Account {self.account_id}: попытка {attempt_count}/{max_attempts} для {vacancy.hh_id} вернула failed")
+                # Проверим, была ли причина "кнопка отправки не найдена" – для этого можем проверить последний лог
+                # (лучше передавать причину из hh_response, но для простоты считаем тестом, если две попытки подряд)
+                if attempt_count >= max_attempts:
+                    # Считаем, что это тест
+                    logger.warning(
+                        f"Account {self.account_id}: вакансия {vacancy.hh_id} предположительно требует теста (2 неудачные попытки).")
+                    await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status="test_required")
+                    await self._log_response(vacancy.hh_id, vacancy.title, vacancy.url, 'test_required',
+                                             'тест от работодателя')
+                    return
+                else:
+                    # Ждём перед повторной попыткой
+                    await self._interruptible_sleep(30)  # небольшая пауза перед повторной попыткой
+                    continue
+            else:
+                # Любой другой статус – считаем ошибкой
+                await error_repo.add(self.account_id, vacancy.hh_id, f"Unknown status: {response_status}",
+                                     error_type='unknown')
+                attempts = self.vacancy_attempts.get(vacancy.hh_id, 0) + 1
+                self.vacancy_attempts[vacancy.hh_id] = attempts
+                if attempts >= 3:
+                    logger.warning(
+                        f"Account {self.account_id}: vacancy {vacancy.hh_id} failed 3 times, marking as failed.")
+                    await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status="failed")
+                await self._log_response(vacancy.hh_id, vacancy.title, vacancy.url, 'failed',
+                                         f'Unknown status: {response_status}')
+                return
+
+        # Если цикл завершился без результата – помечаем как failed
+        logger.error(
+            f"Account {self.account_id}: не удалось обработать вакансию {vacancy.hh_id} за {max_attempts} попыток.")
+        await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status="failed")
+        await self._log_response(vacancy.hh_id, vacancy.title, vacancy.url, 'failed', 'превышено число попыток')
+
+    #
+    # async def _do_response(self, session: AsyncSession, state, today):
+    #     vacancy_repo = VacancyRepository(session)
+    #     error_repo = ResponseErrorRepository(session)
+    #     state_repo = AccountStateRepository(session)
+    #
+    #     vacancy = await vacancy_repo.get_random_unresponded(self.account_id)
+    #     if not vacancy:
+    #         self.consecutive_failures += 1
+    #         if self.consecutive_failures >= 5:
+    #             logger.warning(
+    #                 f"Account {self.account_id}: no actual vacancies after {self.consecutive_failures} attempts. Waiting longer.")
+    #             await self._interruptible_sleep(3600)
+    #             self.consecutive_failures = 0
+    #         else:
+    #             logger.debug(
+    #                 f"Account {self.account_id}: no actual vacancies, attempt {self.consecutive_failures}. Waiting 10 min.")
+    #             await self._interruptible_sleep(600)
+    #         return
+    #     else:
+    #         self.consecutive_failures = 0
+    #
+    #     context = {
+    #         "vacancy_name": vacancy.title,
+    #         "tg_username": settings.TG_USERNAME,
+    #     }
+    #     message = generate_message(self.template, context)
+    #
+    #     try:
+    #         response_status = await self.response_service.respond_to_vacancy(
+    #             vacancy.url, self.resume_id, message, self.context
+    #         )
+    #     except Exception as e:
+    #         logger.exception(f"Account {self.account_id}: exception during response")
+    #         await error_repo.add(self.account_id, vacancy.hh_id, str(e), error_type='exception')
+    #         # Помечаем как failed, чтобы не повторять
+    #         await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status="failed")
+    #         await self._log_response(vacancy.hh_id, vacancy.title, 'failed', str(e))
+    #         return
+    #
+    #     # Обработка статусов
+    #     if response_status == 'success':
+    #         new_done = await state_repo.increment_done(self.account_id, today)
+    #         logger.info(
+    #             f"Account {self.account_id}: ✅ отклик с письмом на {vacancy.hh_id}, done {new_done}/{state.daily_limit}")
+    #         await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status="success")
+    #         await vacancy_repo.increment_used_count(vacancy.hh_id)
+    #         self.vacancy_attempts.pop(vacancy.hh_id, None)
+    #         await self._log_response(vacancy.hh_id, vacancy.title, 'success')
+    #
+    #     elif response_status == 'wo_soprovod':
+    #         new_done = await state_repo.increment_done(self.account_id, today)
+    #         logger.info(
+    #             f"Account {self.account_id}: ⚠️ отклик без письма на {vacancy.hh_id}, done {new_done}/{state.daily_limit}")
+    #         await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status="wo_soprovod")
+    #         await vacancy_repo.increment_used_count(vacancy.hh_id)
+    #         self.vacancy_attempts.pop(vacancy.hh_id, None)
+    #         await self._log_response(vacancy.hh_id, vacancy.title, 'wo_soprovod')
+    #
+    #     else:  # 'failed'
+    #         await error_repo.add(self.account_id, vacancy.hh_id, "Response returned failed",
+    #                              error_type='response_failed')
+    #         attempts = self.vacancy_attempts.get(vacancy.hh_id, 0) + 1
+    #         self.vacancy_attempts[vacancy.hh_id] = attempts
+    #         if attempts >= 3:
+    #             logger.warning(f"Account {self.account_id}: vacancy {vacancy.hh_id} failed 3 times, marking as failed.")
+    #             await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status="failed")
+    #         await self._log_response(vacancy.hh_id, vacancy.title, 'failed', 'response failed')
 
     # async def _do_response(self, session: AsyncSession, state, today):
     #     vacancy_repo = VacancyRepository(session)
@@ -323,7 +436,7 @@ class AccountWorker:
     #                              error_type='response_failed')
     #         attempts = self.vacancy_attempts.get(vacancy.hh_id, 0) + 1
     #         self.vacancy_attempts[vacancy.hh_id] = attempts
-    #         await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status="wo_soporovod")
+    #         await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status="wo_soprovod")
     #
     #         if attempts >= 3:
     #             logger.warning(f"Account {self.account_id}: vacancy {vacancy.hh_id} failed 3 times, marking as failed.")

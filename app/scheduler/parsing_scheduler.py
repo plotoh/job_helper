@@ -22,6 +22,7 @@ from app.db import (
 from app.hh_client.detail_parser import HHVacancyDetailParser
 from app.hh_client.list_parser import HHVacancyListParser
 from app.hh_client.vacancy_filter import VacancyFilter
+from app.scoring.scorer import VacancyScorer
 from app.utils.time_utils import msk_now, MSK_TZ
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ class ParsingScheduler:
         self.detail_parser = HHVacancyDetailParser()
         self.filter_service = VacancyFilter()
         self.stop_event = asyncio.Event()
+        self.scorer = VacancyScorer()
 
     async def _interruptible_sleep(self, seconds: float):
         """Спит с проверкой stop_event каждые 10 секунд."""
@@ -119,7 +121,7 @@ class ParsingScheduler:
         start_time = msk_now()
         start_time_naive = start_time.replace(tzinfo=None)
 
-        # --- Проверка дневного лимита ---
+        # Проверка дневного лимита
         today_start = start_time.replace(hour=0, minute=0, second=0, microsecond=0).replace(tzinfo=None)
         async with AsyncSessionLocal() as session:
             total_today = await session.execute(
@@ -153,9 +155,8 @@ class ParsingScheduler:
             pages_to_do = settings.PAGES_PER_WINDOW
 
             for i in range(1, pages_to_do + 1):
-                # Проверяем лимит перед каждой страницей
                 if total_saved >= settings.DAILY_PARSING_LIMIT:
-                    logger.info(f"Daily limit reached, stopping further pages.")
+                    logger.info("Daily limit reached, stopping further pages.")
                     break
 
                 next_page = progress.last_page + i
@@ -168,28 +169,25 @@ class ParsingScheduler:
                     logger.info(f"No vacancies found on page {next_page}, stopping further pages.")
                     break
 
-                regular = []
-                junior = []
-                senior = []
-                rejected = []
-
+                # Категоризируем все вакансии и добавляем поле category
+                all_vacancies = []
                 for vac in vacancies_list:
                     category = self.filter_service.categorize(vac['title'])
-                    if category == 'regular':
-                        regular.append(vac)
-                    elif category == 'junior':
-                        junior.append(vac)
-                    elif category == 'senior':
-                        senior.append(vac)
-                    else:
-                        rejected.append(vac)
+                    vac['category'] = category
+                    all_vacancies.append(vac)
 
+                # Логируем статистику по категориям
+                regular_count = sum(1 for v in all_vacancies if v['category'] == 'regular')
+                junior_count = sum(1 for v in all_vacancies if v['category'] == 'junior')
+                senior_count = sum(1 for v in all_vacancies if v['category'] == 'senior')
+                rejected_count = sum(1 for v in all_vacancies if v['category'] == 'reject')
                 logger.info(
-                    f"Page {next_page}: regular={len(regular)}, junior={len(junior)}, "
-                    f"senior={len(senior)}, rejected={len(rejected)}"
+                    f"Page {next_page}: regular={regular_count}, junior={junior_count}, "
+                    f"senior={senior_count}, rejected={rejected_count}"
                 )
 
-                # --- Сохраняем rejected в БД и в текстовый файл ---
+                # Сохраняем rejected отдельно (в таблицу и файл)
+                rejected = [v for v in all_vacancies if v['category'] == 'reject']
                 if rejected:
                     async with AsyncSessionLocal() as session:
                         for vac in rejected:
@@ -201,7 +199,6 @@ class ParsingScheduler:
                             ).on_conflict_do_nothing(index_elements=['hh_id'])
                             await session.execute(stmt)
                         await session.commit()
-                    # Лог в файл
                     log_dir = Path(settings.REJECTED_LOGS_DIR)
                     log_dir.mkdir(exist_ok=True)
                     today_str = msk_now().strftime("%Y-%m-%d")
@@ -211,31 +208,13 @@ class ParsingScheduler:
                             f.write(f"{vac['title']} | {vac['url']}\n")
                     logger.info(f"Appended {len(rejected)} rejected vacancies to {log_file}")
 
-                if junior:
-                    async with AsyncSessionLocal() as session:
-                        for vac in junior:
-                            stmt = pg_insert(JuniorVacancy).values(
-                                hh_id=vac['id'],
-                                title=vac['title'],
-                                url=vac['url']
-                            ).on_conflict_do_nothing(index_elements=['hh_id'])
-                            await session.execute(stmt)
-                        await session.commit()
-                    logger.info(f"Saved {len(junior)} junior vacancies")
+                # Оставляем только те, что не rejected (regular, junior, senior)
+                to_parse = [v for v in all_vacancies if v['category'] != 'reject']
+                if not to_parse:
+                    logger.info("No non-rejected vacancies to parse on this page.")
+                    continue
 
-                if senior:
-                    async with AsyncSessionLocal() as session:
-                        for vac in senior:
-                            stmt = pg_insert(SeniorVacancy).values(
-                                hh_id=vac['id'],
-                                title=vac['title'],
-                                url=vac['url']
-                            ).on_conflict_do_nothing(index_elements=['hh_id'])
-                            await session.execute(stmt)
-                        await session.commit()
-                    logger.info(f"Saved {len(senior)} senior vacancies")
-
-                # Парсим регулярные вакансии
+                # Парсим все оставшиеся вакансии
                 semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT)
 
                 async def parse_one(vac):
@@ -243,12 +222,20 @@ class ParsingScheduler:
                         logger.debug(f"🔍 Парсинг вакансии {vac['id']} - {vac['title']}")
                         try:
                             details = await self.detail_parser.parse(vac['url'], self.context)
-                            return {**vac, **details}
+                            vacancy_data = {**vac, **details}
+                            # Вычисляем скор
+                            score = self.scorer.compute(vacancy_data)
+                            vacancy_data['score'] = score
+                            # Устанавливаем уровень (из категории)
+                            level = vac['category']  # 'regular', 'junior', 'senior'
+                            vacancy_data['level'] = level
+                            logger.info(f"Vacancy {vac['id']} (\"{vac['title']}\") score: {score}, level: {level}")
+                            return vacancy_data
                         except Exception as e:
                             logger.error(f"❌ Ошибка парсинга {vac['id']}: {e}", exc_info=True)
                             return None
 
-                tasks = [parse_one(v) for v in regular]
+                tasks = [parse_one(v) for v in to_parse]
                 results = await asyncio.gather(*tasks)
                 successful = [r for r in results if r is not None]
 
@@ -288,6 +275,196 @@ class ParsingScheduler:
                 log_entry_db.status = 'failed'
                 log_entry_db.error = str(e)
                 await session.commit()
+
+    # async def _run_parsing(self, window_idx: int):
+    #     logger.info(f"Starting parsing for window {window_idx}")
+    #     start_time = msk_now()
+    #     start_time_naive = start_time.replace(tzinfo=None)
+    #
+    #
+    #     # --- Проверка дневного лимита ---
+    #     today_start = start_time.replace(hour=0, minute=0, second=0, microsecond=0).replace(tzinfo=None)
+    #     async with AsyncSessionLocal() as session:
+    #         total_today = await session.execute(
+    #             select(func.sum(ParsingLog.vacancies_found))
+    #             .where(ParsingLog.started_at >= today_start)
+    #         )
+    #         total = total_today.scalar() or 0
+    #         if total >= settings.DAILY_PARSING_LIMIT:
+    #             logger.info(f"Daily parsing limit reached ({total} >= {settings.DAILY_PARSING_LIMIT}), skipping window")
+    #             return
+    #
+    #     # Создаём лог-запись
+    #     async with AsyncSessionLocal() as session:
+    #         log_entry = ParsingLog(
+    #             window_index=window_idx,
+    #             started_at=start_time_naive,
+    #             status='started'
+    #         )
+    #         session.add(log_entry)
+    #         await session.commit()
+    #         await session.refresh(log_entry)
+    #         log_id = log_entry.id
+    #
+    #     total_saved = 0
+    #     pages_processed = 0
+    #     try:
+    #         async with AsyncSessionLocal() as session:
+    #             progress_repo = ParsingProgressRepository(session)
+    #             progress = await progress_repo.get_or_create(settings.HH_SEARCH_URL)
+    #
+    #         pages_to_do = settings.PAGES_PER_WINDOW
+    #
+    #         for i in range(1, pages_to_do + 1):
+    #             # Проверяем лимит перед каждой страницей
+    #             if total_saved >= settings.DAILY_PARSING_LIMIT:
+    #                 logger.info(f"Daily limit reached, stopping further pages.")
+    #                 break
+    #
+    #             next_page = progress.last_page + i
+    #             logger.info(f"Parsing page {next_page} for window {window_idx}")
+    #
+    #             vacancies_list = await self.list_parser.fetch_ids(
+    #                 settings.HH_SEARCH_URL, next_page, self.context
+    #             )
+    #             if not vacancies_list:
+    #                 logger.info(f"No vacancies found on page {next_page}, stopping further pages.")
+    #                 break
+    #
+    #             regular = []
+    #             junior = []
+    #             senior = []
+    #             rejected = []
+    #
+    #             for vac in vacancies_list:
+    #                 category = self.filter_service.categorize(vac['title'])
+    #                 if category == 'regular':
+    #                     regular.append(vac)
+    #                 elif category == 'junior':
+    #                     junior.append(vac)
+    #                 elif category == 'senior':
+    #                     senior.append(vac)
+    #                 else:
+    #                     rejected.append(vac)
+    #
+    #             logger.info(
+    #                 f"Page {next_page}: regular={len(regular)}, junior={len(junior)}, "
+    #                 f"senior={len(senior)}, rejected={len(rejected)}"
+    #             )
+    #
+    #             # --- Сохраняем rejected в БД и в текстовый файл ---
+    #             if rejected:
+    #                 async with AsyncSessionLocal() as session:
+    #                     for vac in rejected:
+    #                         stmt = pg_insert(FilteredOutVacancy).values(
+    #                             hh_id=vac['id'],
+    #                             title=vac['title'],
+    #                             url=vac['url'],
+    #                             filter_reason='filtered out by criteria'
+    #                         ).on_conflict_do_nothing(index_elements=['hh_id'])
+    #                         await session.execute(stmt)
+    #                     await session.commit()
+    #                 # Лог в файл
+    #                 log_dir = Path(settings.REJECTED_LOGS_DIR)
+    #                 log_dir.mkdir(exist_ok=True)
+    #                 today_str = msk_now().strftime("%Y-%m-%d")
+    #                 log_file = log_dir / f"rejected_{today_str}.txt"
+    #                 with open(log_file, "a", encoding="utf-8") as f:
+    #                     for vac in rejected:
+    #                         f.write(f"{vac['title']} | {vac['url']}\n")
+    #                 logger.info(f"Appended {len(rejected)} rejected vacancies to {log_file}")
+    #             if junior:
+    #                 async with AsyncSessionLocal() as session:
+    #                     for vac in junior:
+    #                         stmt = pg_insert(JuniorVacancy).values(
+    #                             hh_id=vac['id'],
+    #                             title=vac['title'],
+    #                             url=vac['url']
+    #                         ).on_conflict_do_nothing(index_elements=['hh_id'])
+    #                         await session.execute(stmt)
+    #                     await session.commit()
+    #                 logger.info(f"Saved {len(junior)} junior vacancies")
+    #
+    #             if senior:
+    #                 async with AsyncSessionLocal() as session:
+    #                     for vac in senior:
+    #                         stmt = pg_insert(SeniorVacancy).values(
+    #                             hh_id=vac['id'],
+    #                             title=vac['title'],
+    #                             url=vac['url']
+    #                         ).on_conflict_do_nothing(index_elements=['hh_id'])
+    #                         await session.execute(stmt)
+    #                     await session.commit()
+    #                 logger.info(f"Saved {len(senior)} senior vacancies")
+    #
+    #             # Парсим регулярные вакансии
+    #             semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT)
+    #
+    #             async def parse_one(vac):
+    #                 async with semaphore:
+    #                     logger.debug(f"🔍 Парсинг вакансии {vac['id']} - {vac['title']}")
+    #                     try:
+    #                         details = await self.detail_parser.parse(vac['url'], self.context)
+    #                         vacancy_data = {**vac, **details}
+    #                         # --- ВЫЧИСЛЕНИЕ СКОРА ---
+    #                         score = self.scorer.compute(vacancy_data)
+    #                         vacancy_data['score'] = score
+    #                         # --- ЛОГИРОВАНИЕ СКОРА ---
+    #                         logger.info(f"Vacancy {vac['id']} (\"{vac['title']}\") score: {score}")
+    #                         return vacancy_data
+    #                     except Exception as e:
+    #                         logger.error(f"❌ Ошибка парсинга {vac['id']}: {e}", exc_info=True)
+    #                         return None
+    #             # async def parse_one(vac):
+    #             #     async with semaphore:
+    #             #         logger.debug(f"🔍 Парсинг вакансии {vac['id']} - {vac['title']}")
+    #             #         try:
+    #             #             details = await self.detail_parser.parse(vac['url'], self.context)
+    #             #             return {**vac, **details}
+    #             #         except Exception as e:
+    #             #             logger.error(f"❌ Ошибка парсинга {vac['id']}: {e}", exc_info=True)
+    #             #             return None
+    #
+    #             tasks = [parse_one(v) for v in regular]
+    #             results = await asyncio.gather(*tasks)
+    #             successful = [r for r in results if r is not None]
+    #
+    #             saved_this_page = 0
+    #             async with AsyncSessionLocal() as session:
+    #                 repo = VacancyRepository(session)
+    #                 for vac in successful:
+    #                     inserted = await repo.save_if_not_exists(vac)
+    #                     if inserted:
+    #                         saved_this_page += 1
+    #                 logger.info(f"Page {next_page}: saved {saved_this_page} new vacancies")
+    #                 total_saved += saved_this_page
+    #
+    #             async with AsyncSessionLocal() as session:
+    #                 progress_repo = ParsingProgressRepository(session)
+    #                 await progress_repo.update_last_page(settings.HH_SEARCH_URL, next_page)
+    #                 pages_processed += 1
+    #
+    #         # Обновляем лог
+    #         async with AsyncSessionLocal() as session:
+    #             stmt = select(ParsingLog).where(ParsingLog.id == log_id)
+    #             result = await session.execute(stmt)
+    #             log_entry_db = result.scalar_one()
+    #             log_entry_db.finished_at = msk_now().replace(tzinfo=None)
+    #             log_entry_db.vacancies_found = total_saved
+    #             log_entry_db.status = 'success'
+    #             await session.commit()
+    #         logger.info(f"Window {window_idx} completed. Total saved: {total_saved}")
+    #
+    #     except Exception as e:
+    #         logger.exception(f"Parsing failed for window {window_idx}")
+    #         async with AsyncSessionLocal() as session:
+    #             stmt = select(ParsingLog).where(ParsingLog.id == log_id)
+    #             result = await session.execute(stmt)
+    #             log_entry_db = result.scalar_one()
+    #             log_entry_db.finished_at = msk_now().replace(tzinfo=None)
+    #             log_entry_db.status = 'failed'
+    #             log_entry_db.error = str(e)
+    #             await session.commit()
 
     async def stop(self):
         self.stop_event.set()
