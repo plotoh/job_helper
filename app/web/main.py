@@ -337,23 +337,67 @@ async def api_account_history(account_id: int, limit: int = 20):
         }
 
 
-@app.post("/api/accounts/{account_id}/pause")
-async def api_pause_account(account_id: int, request: PauseRequest):
-    """Поставить аккаунт на паузу."""
+@app.post("/api/accounts/{account_id}/resume")
+async def api_resume_account(account_id: int):
     today = msk_now().date()
     async with AsyncSessionLocal() as session:
         repo = AccountStateRepository(session)
         state = await repo.get_for_today(account_id, today)
         if not state:
             raise HTTPException(status_code=404, detail="Account state not found")
+        state.status = 'active'
+        state.pause_until = None
+        state.manual_override = True  # <-- ключевое: игнорируем расписание и паузы
+        await session.commit()
+        return {"status": "ok"}
 
+
+@app.post("/api/accounts/{account_id}/pause")
+async def api_pause_account(account_id: int, request: PauseRequest):
+    today = msk_now().date()
+    async with AsyncSessionLocal() as session:
+        repo = AccountStateRepository(session)
+        state = await repo.get_for_today(account_id, today)
+        if not state:
+            raise HTTPException(status_code=404, detail="Account state not found")
         if request.duration_minutes is None:
-            pause_until = msk_now() + timedelta(days=365)  # бессрочно
+            pause_until = msk_now() + timedelta(days=365)
         else:
             pause_until = msk_now() + timedelta(minutes=request.duration_minutes)
-
-        await repo.update_status(account_id, today, 'paused', pause_until=pause_until)
+        state.status = 'paused'
+        state.pause_until = pause_until
+        state.manual_override = False  # <-- возвращаем обычное расписание
+        await session.commit()
         return {"status": "ok", "pause_until": pause_until.isoformat()}
+
+
+# @app.post("/api/accounts/{account_id}/pause")
+# async def api_pause_account(account_id: int, request: PauseRequest):
+#     """Поставить аккаунт на паузу."""
+#     today = msk_now().date()
+#     async with AsyncSessionLocal() as session:
+#         repo = AccountStateRepository(session)
+#         state = await repo.get_for_today(account_id, today)
+#         if not state:
+#             raise HTTPException(status_code=404, detail="Account state not found")
+#
+#         if request.duration_minutes is None:
+#             pause_until = msk_now() + timedelta(days=365)  # бессрочно
+#         else:
+#             pause_until = msk_now() + timedelta(minutes=request.duration_minutes)
+#
+#         await repo.update_status(account_id, today, 'paused', pause_until=pause_until)
+#         return {"status": "ok", "pause_until": pause_until.isoformat()}
+#
+#
+# @app.post("/api/accounts/{account_id}/resume")
+# async def api_resume_account(account_id: int):
+#     """Снять паузу с аккаунта."""
+#     today = msk_now().date()
+#     async with AsyncSessionLocal() as session:
+#         repo = AccountStateRepository(session)
+#         await repo.update_status(account_id, today, 'active', pause_until=None)
+#         return {"status": "ok"}
 
 
 @app.post("/api/settings/responses/enable")
@@ -378,16 +422,6 @@ async def responses_status():
 async def force_parsing():
     await set_setting('force_parsing', 'true')
     return {"status": "ok", "message": "Парсинг будет запущен в течение 10 секунд"}
-
-
-@app.post("/api/accounts/{account_id}/resume")
-async def api_resume_account(account_id: int):
-    """Снять паузу с аккаунта."""
-    today = msk_now().date()
-    async with AsyncSessionLocal() as session:
-        repo = AccountStateRepository(session)
-        await repo.update_status(account_id, today, 'active', pause_until=None)
-        return {"status": "ok"}
 
 
 @app.post("/api/settings/include-junior")

@@ -32,11 +32,7 @@ class Vacancy(Base):
     used_count = Column(Integer, default=0)  # сколько аккаунтов уже откликнулось
     description = Column(Text, nullable=True)  # полное описание вакансии
     score = Column(Integer, default=0)
-    level = Column(
-        Enum(VacancyLevel, values_callable=lambda x: [e.value for e in x]),
-        nullable=False,
-        default=VacancyLevel.REGULAR
-    )
+    level = Column(String(20), nullable=False, default='regular')
 
 class Account(Base):
     __tablename__ = 'accounts'
@@ -86,6 +82,7 @@ class AccountDailyState(Base):
     pause_until = Column(DateTime, nullable=True)  # если в паузе, до какого момента
     completed_at = Column(DateTime, nullable=True)  # когда завершён день (достигнут лимит или конец дня)
     last_updated = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    manual_override = Column(Boolean, default=False, server_default='false')
 
     # Индексы для быстрого поиска
     __table_args__ = (

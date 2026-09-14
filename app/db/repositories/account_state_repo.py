@@ -4,6 +4,9 @@ from sqlalchemy import select, update, and_, DateTime, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import AccountDailyState
 
+# Sentinel для различения "не передано" и "передано None"
+_UNSET = object()
+
 
 class AccountStateRepository:
     def __init__(self, session: AsyncSession):
@@ -60,11 +63,23 @@ class AccountStateRepository:
         await self.session.commit()
         return result.scalar_one()
 
-    async def update_status(self, account_id: int, today: date, status: str, pause_until: Optional[DateTime] = None):
-        """Обновить статус и опционально время окончания паузы"""
+    async def update_status(
+            self,
+            account_id: int,
+            today: date,
+            status: str,
+            pause_until: Any = _UNSET,
+    ):
+        """
+        Обновить статус и, опционально, время окончания паузы.
+
+        Если pause_until не передан — поле не трогается.
+        Если pause_until=None — поле явно очищается в БД.
+        Если pause_until=<datetime> — поле устанавливается.
+        """
         values = {'status': status}
-        if pause_until is not None:
-            values['pause_until'] = pause_until
+        if pause_until is not _UNSET:
+            values['pause_until'] = pause_until  # может быть None — это очистит поле
         stmt = (
             update(AccountDailyState)
             .where(

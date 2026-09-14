@@ -148,6 +148,23 @@ hhparser/
 ├── Dockerfile.web
 └── requirements.txt
 ```
+Обнуление счётчика used_count для всех вакансий
+docker exec -it hhparser_db psql -U user -d hhparser -c "UPDATE vacancies SET used_count = 0;"
+
+✅ Проверка результата
+docker exec -it hhparser_db psql -U user -d hhparser -c "SELECT used_count, COUNT(*) FROM vacancies GROUP BY used_count ORDER BY used_count;"
+
+Обнуление счётчика страниц поиска
+
+Посмотреть текущее значение
+docker exec -it hhparser_db psql -U user -d hhparser -c "SELECT id, search_url, last_page FROM parsing_progress;"
+
+Обнулить last_page для всех записей (все URL)
+docker exec -it hhparser_db psql -U user -d hhparser -c "UPDATE parsing_progress SET last_page = 0;"
+
+Проверка
+docker exec -it hhparser_db psql -U user -d hhparser -c "SELECT id, last_page FROM parsing_progress;"
+
 
 ---
 

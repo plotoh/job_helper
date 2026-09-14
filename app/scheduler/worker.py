@@ -177,7 +177,8 @@ class Worker:
                             'daily_limit': limit,
                             'pauses': pauses,
                             'done_count': 0,
-                            'status': 'pending'
+                            'status': 'pending',
+                            'manual_override': False,
                         }
                         await state_repo.create_or_update(acc.id, today, data)
                         logger.info(f"Account {acc.id}: limit={limit}, pauses={pauses}")

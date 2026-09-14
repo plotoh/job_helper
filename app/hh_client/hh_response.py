@@ -1,14 +1,62 @@
 import asyncio
 import logging
-from playwright.async_api import BrowserContext, TimeoutError as PlaywrightTimeoutError
+from datetime import datetime
+from pathlib import Path
+from playwright.async_api import BrowserContext
+
 from app.hh_client.interfaces import IResponseService
 
 logger = logging.getLogger(__name__)
 
+# === Селекторы (проверены по реальному HTML hh.ru) ===
+RESPOND_BUTTON_SELECTORS = [
+    'a[data-qa="vacancy-response-link-top"]',
+    'button[data-qa="vacancy-response-link-top"]',
+    'a[data-qa="vacancy-response-link-bottom"]',
+    'button[data-qa="vacancy-response-link-bottom"]',
+]
+
+# Кнопка "Приложить сопроводительное письмо" (после простого отклика)
+ATTACH_LETTER_SELECTOR = '[data-qa="responded-success-attach-cover-letter"]'
+
+# Индикаторы теста (любой из них => это тест, а не обычный отклик)
+TEST_INDICATORS = [
+    '[data-qa="employer-asking-for-test"]',
+    '[data-qa="task-question"]',
+    '[data-qa="task-body"]',
+    '[data-qa="test-description"]',
+]
+
+# Точное поле сопроводительного письма
+LETTER_FIELD_SELECTORS = [
+    'textarea[data-qa="vacancy-response-popup-form-letter-input"]',
+    'textarea[data-qa="vacancy-response-letter"]',
+]
+
+# Точная кнопка submit в попапе отклика
+SUBMIT_POPUP_SELECTORS = [
+    'button[data-qa="vacancy-response-submit-popup"]',
+    'button[data-qa="vacancy-response-letter-submit"]',
+]
+
+# Общие селекторы успеха
+SUCCESS_SELECTORS = [
+    'div[data-qa="vacancy-response-success"]',
+]
+
+# Текстовые маркеры
+SUCCESS_TEXT_PATTERNS = [
+    r'резюме доставлено',
+    r'отклик отправлен',
+    r'вы откликнулись',
+]
+
 
 class HHResponseService(IResponseService):
+
+    # ---------- Служебные ----------
+
     async def _handle_dialogs(self, page):
-        """Закрывает всплывающие окна (регион, куки), которые могут помешать отклику."""
         try:
             region_confirm = page.locator('button[data-qa="confirm-phone-region"]')
             if await region_confirm.count() > 0:
@@ -21,82 +69,231 @@ class HHResponseService(IResponseService):
         except Exception:
             pass
 
-    async def _find_message_field(self, page):
-        """Универсальный поиск поля ввода сопроводительного письма."""
-        possible_selectors = [
-            'textarea[name="text"]',
-            'textarea[data-qa="vacancy-response-letter"]',
-            'div[data-qa="vacancy-response-letter"] textarea',
-            'form textarea',
-            'div[class*="letter"] textarea',
-            'textarea'  # последний шанс – любой textarea на странице
-        ]
-        for selector in possible_selectors:
-            field = page.locator(selector).first
-            if await field.count() > 0 and await field.is_visible():
-                logger.info(f"✅ Поле ввода найдено по селектору: {selector}")
-                return field
+    async def _dump_page_debug(self, page, tag: str):
+        debug_dir = Path("logs/debug")
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        screenshot_path = debug_dir / f"{ts}_{tag}.png"
+        html_path = debug_dir / f"{ts}_{tag}.html"
+        try:
+            await page.screenshot(path=str(screenshot_path), full_page=True)
+            html = await page.content()
+            html_path.write_text(html, encoding="utf-8")
+            logger.info(f"🖼️ Debug сохранён: {screenshot_path.name}")
+        except Exception as e:
+            logger.warning(f"Не удалось сохранить debug: {e}")
+
+    # ---------- Детекторы ----------
+    async def _is_already_responded(self, page) -> bool:
+        """
+        Признаки того, что на эту вакансию уже был отклик (текущим аккаунтом).
+        """
+        # Самый надёжный — кнопка "Приложить сопроводительное письмо"
+        if await page.locator(ATTACH_LETTER_SELECTOR).count() > 0:
+            return True
+        # Кнопка "Чат" в блоке отклика — она появляется только после отклика
+        if await page.locator('[data-qa="vacancy-response-link-view-topic"]').count() > 0:
+            return True
+        # Текстовые маркеры
+        for pattern in (r'вы откликнулись', r'резюме доставлено'):
+            try:
+                if await page.locator(f'text=/{pattern}/i').count() > 0:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _is_test_modal(self, page) -> bool:
+        """
+        Определяет, что открылась модалка с тестом.
+        Проверяем ТОЛЬКО по специфичным data-qa (не по общим textarea!).
+        """
+        for sel in TEST_INDICATORS:
+            try:
+                loc = page.locator(sel)
+                if await loc.count() > 0:
+                    if await loc.first.is_visible():
+                        logger.debug(f"🧪 Тест-индикатор: {sel}")
+                        return True
+            except Exception:
+                continue
+        return False
+
+    async def _has_success_marker(self, page) -> bool:
+        for sel in SUCCESS_SELECTORS:
+            try:
+                if await page.locator(sel).count() > 0:
+                    return True
+            except Exception:
+                continue
+        try:
+            if await page.locator(ATTACH_LETTER_SELECTOR).count() > 0:
+                return True
+        except Exception:
+            pass
+        for pattern in SUCCESS_TEXT_PATTERNS:
+            try:
+                if await page.locator(f'text=/{pattern}/i').count() > 0:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _find_letter_field(self, page):
+        """
+        Ищем ИМЕННО поле сопроводительного письма.
+        Не трогаем поля вопросов теста.
+        """
+        for sel in LETTER_FIELD_SELECTORS:
+            try:
+                loc = page.locator(sel).first
+                if await loc.count() > 0 and await loc.is_visible():
+                    logger.info(f"✅ Поле письма найдено: {sel}")
+                    return loc
+            except Exception:
+                continue
+        logger.warning("⚠️ Поле письма не найдено по точным селекторам")
         return None
 
     async def _check_iframe(self, page):
-        """Проверяет, не открылась ли форма отклика в iframe."""
         iframe = page.locator('iframe[src*="vacancy-response"], iframe[src*="response"]').first
-        if await iframe.count() > 0:
-            logger.info("📦 Форма отклика в iframe, переключаемся...")
-            frame = await iframe.content_frame()
-            return frame
+        try:
+            if await iframe.count() > 0:
+                logger.info("📦 Форма в iframe, переключаемся...")
+                return await iframe.content_frame()
+        except Exception:
+            pass
         return None
+
+    # ---------- Прикладывание письма (после простого отклика) ----------
+
+    async def _attach_cover_letter(self, page, message: str) -> str:
+        attach_btn = page.locator(ATTACH_LETTER_SELECTOR).first
+        if await attach_btn.count() == 0:
+            logger.error("❌ Кнопка 'Приложить сопроводительное' не найдена")
+            return 'failed'
+
+        logger.info("🖱️ Кликаем 'Приложить сопроводительное письмо'")
+        await attach_btn.click(no_wait_after=True)
+        await asyncio.sleep(2)
+
+        if await self._is_test_modal(page):
+            logger.warning("🧪 После 'Приложить письмо' всплыл тест")
+            return 'test_required'
+
+        frame = await self._check_iframe(page)
+        page_for_field = frame if frame else page
+
+        letter_field = await self._find_letter_field(page_for_field)
+        if not letter_field:
+            await self._dump_page_debug(page, "attach_no_field")
+            return 'failed'
+
+        try:
+            await letter_field.click()
+            await asyncio.sleep(0.3)
+            await letter_field.fill(message)
+            logger.info("📨 Письмо вставлено")
+        except Exception as e:
+            logger.error(f"❌ Не удалось заполнить поле: {e}")
+            return 'failed'
+
+        submit_button = None
+        for sel in SUBMIT_POPUP_SELECTORS:
+            btn = page.locator(sel).first
+            if await btn.count() > 0 and await btn.is_visible():
+                submit_button = btn
+                logger.info(f"✅ Кнопка отправки: {sel}")
+                break
+
+        if not submit_button:
+            logger.error("❌ Кнопка отправки не найдена")
+            return 'failed'
+
+        await submit_button.click()
+        await asyncio.sleep(3)
+
+        if await self._is_test_modal(page):
+            return 'test_required'
+        if await self._has_success_marker(page):
+            logger.info("🎉 Письмо приложено, отклик подтверждён")
+            return 'success'
+        logger.warning("⚠️ Явного маркера успеха нет, но submit прошёл")
+        return 'success'
+
+    # ---------- Основной метод ----------
 
     async def respond_to_vacancy(
             self, vacancy_url: str, resume_id: str, message: str, context: BrowserContext
     ) -> str:
-        """
-        Возвращает:
-        - 'success' – отклик отправлен с письмом
-        - 'wo_soprovod' – отклик отправлен, но письмо не вставлено (или не требовалось)
-        - 'failed' – ошибка (кнопка не найдена, форма не открылась и т.п.)
-        """
         page = await context.new_page()
         try:
-            logger.info(f"➡️ Переходим на страницу вакансии: {vacancy_url}")
+            logger.info(f"➡️ Переход: {vacancy_url}")
             await page.goto(vacancy_url, wait_until="domcontentloaded", timeout=60000)
             await self._handle_dialogs(page)
+            await asyncio.sleep(1)
 
-            # Ищем кнопку отклика
-            logger.info("🔍 Ищем кнопку отклика...")
-            respond_button = page.locator('a[data-qa="vacancy-response-link-top"]').first
-            if await respond_button.count() == 0:
-                respond_button = page.locator('a[data-qa="vacancy-response-link-bottom"]').first
-            if await respond_button.count() == 0:
-                logger.warning(f"❌ Кнопка отклика не найдена на {vacancy_url}")
+            # --- СЦЕНАРИЙ A: уже откликались ранее ---
+            if await page.locator(ATTACH_LETTER_SELECTOR).count() > 0:
+                logger.info("ℹ️ Уже откликались — прикладываем письмо")
+                return await self._attach_cover_letter(page, message)
+
+            # --- СЦЕНАРИЙ B: кликаем по кнопке отклика ---
+            respond_button = None
+            for sel in RESPOND_BUTTON_SELECTORS:
+                btn = page.locator(sel).first
+                try:
+                    if await btn.count() > 0:
+                        respond_button = btn
+                        logger.info(f"✅ Кнопка отклика: {sel}")
+                        break
+                except Exception:
+                    continue
+
+            if not respond_button:
+                # Может, уже откликались? Кнопки "Откликнуться" в этом случае нет.
+                if await self._is_already_responded(page):
+                    logger.info("ℹ️ Кнопки отклика нет, но есть признаки уже сделанного отклика")
+                    # Если есть куда приложить письмо — прикладываем
+                    if await page.locator(ATTACH_LETTER_SELECTOR).count() > 0:
+                        return await self._attach_cover_letter(page, message)
+                    return 'already_responded'
+
+                logger.warning("❌ Кнопка отклика не найдена и признаков отклика нет")
+                await self._dump_page_debug(page, "no_respond_button")
                 return 'failed'
 
-            logger.info("✅ Кнопка найдена, кликаем...")
             await respond_button.click(no_wait_after=True)
-            logger.info("✅ Кнопка нажата, ожидаем появления формы...")
+            await asyncio.sleep(3)
 
-            # Даём время на загрузку формы
-            await asyncio.sleep(2)
+            # --- ГЛАВНАЯ ПРОВЕРКА: тест? ---
+            if await self._is_test_modal(page):
+                logger.warning("🧪 Открылся тест — отклик НЕ отправлен, возвращаем test_required")
+                await self._dump_page_debug(page, "test_modal")
+                return 'test_required'
 
-            # Проверяем iframe
+            # --- Отклик ушёл без модалки → "Приложить письмо" ---
+            if await page.locator(ATTACH_LETTER_SELECTOR).count() > 0:
+                logger.info("ℹ️ Отклик ушёл без модалки — прикладываем письмо")
+                return await self._attach_cover_letter(page, message)
+
+            # --- Модалка success (уже откликались) ---
+            if await page.locator(SUCCESS_SELECTORS[0]).count() > 0:
+                logger.info("ℹ️ Модалка success")
+                if await page.locator(ATTACH_LETTER_SELECTOR).count() > 0:
+                    return await self._attach_cover_letter(page, message)
+                return 'success'
+
+            # --- СЦЕНАРИЙ C: обычная форма с полем письма ---
             frame = await self._check_iframe(page)
             page_for_field = frame if frame else page
 
-            # Проверяем, не появился ли сразу успешный отклик (например, отклик уже был)
-            success_selector = 'div[data-qa="vacancy-response-success"]'
-            if await page.locator(success_selector).count() > 0:
-                logger.info("ℹ️ Отклик уже был отправлен ранее.")
-                return 'success'  # считаем успехом
+            letter_field = await self._find_letter_field(page_for_field)
 
-            # Ищем поле ввода письма
-            message_field = await self._find_message_field(page_for_field)
-
-            # Если поле не появилось
-            if not message_field:
-                # Проверяем, может быть, нужно выбрать резюме
-                resume_selector = 'div[data-qa="resume-selector"]'
-                if await page.locator(resume_selector).count() > 0:
-                    logger.info("🔍 Появился выбор резюме, ищем нужное...")
+            # Если поля нет — может, выбор резюме
+            if not letter_field:
+                if await page.locator('div[data-qa="resume-selector"]').count() > 0:
+                    logger.info("🔍 Выбор резюме...")
                     resume_radio = page.locator(f'input[type="radio"][value="{resume_id}"]')
                     if await resume_radio.count() > 0:
                         await resume_radio.click()
@@ -104,383 +301,69 @@ class HHResponseService(IResponseService):
                         first_radio = page.locator('input[type="radio"][name="resume"]').first
                         if await first_radio.count() > 0:
                             await first_radio.click()
-                        else:
-                            logger.error("❌ Нет доступных резюме для выбора")
-                            return 'failed'
                     await asyncio.sleep(1)
-                    # После выбора резюме снова ищем поле
-                    message_field = await self._find_message_field(page_for_field)
-                    if not message_field:
-                        # Если поле так и не появилось, проверяем успех
-                        if await page.locator(success_selector).count() > 0:
-                            logger.info("ℹ️ Отклик отправлен без письма.")
-                            return 'wo_soprovod'
-                        else:
-                            # Проверяем, есть ли кнопка отправки без поля
-                            submit_btn = page.locator('button[data-qa="vacancy-response-letter-submit"]').first
-                            if await submit_btn.count() > 0 and await submit_btn.is_visible():
-                                logger.warning(
-                                    "⚠️ Поле ввода не найдено, но кнопка отправки есть. Пробуем отправить без письма.")
-                                await submit_btn.click()
-                                await asyncio.sleep(3)
-                                if await page.locator(success_selector).count() > 0:
-                                    logger.info("🎉 Отклик отправлен без письма (успех)")
-                                    return 'wo_soprovod'
-                                else:
-                                    logger.error("❌ Не удалось отправить отклик без письма.")
-                                    return 'failed'
-                            else:
-                                logger.error("❌ Поле ввода не появилось, и нет других признаков успеха.")
-                                return 'failed'
-                else:
-                    # Нет выбора резюме, проверяем кнопку отправки
-                    submit_btn = page.locator('button[data-qa="vacancy-response-letter-submit"]').first
-                    if await submit_btn.count() > 0 and await submit_btn.is_visible():
-                        logger.warning(
-                            "⚠️ Поле ввода не найдено, но кнопка отправки есть. Пробуем отправить без письма.")
-                        await submit_btn.click()
-                        await asyncio.sleep(3)
-                        if await page.locator(success_selector).count() > 0:
-                            logger.info("🎉 Отклик отправлен без письма (успех)")
-                            return 'wo_soprovod'
-                        else:
-                            logger.error("❌ Не удалось отправить отклик без письма.")
-                            return 'failed'
-                    else:
-                        # Проверяем, может отклик уже отправлен без письма?
-                        if await page.locator(success_selector).count() > 0:
-                            logger.info("ℹ️ Отклик отправлен без письма (успех)")
-                            return 'wo_soprovod'
-                        else:
-                            logger.error("❌ Поле ввода не появилось, и нет других признаков успеха.")
-                            return 'failed'
+                    letter_field = await self._find_letter_field(page_for_field)
 
-            # --- Поле ввода найдено ---
-            try:
-                await message_field.click()
-                await asyncio.sleep(0.5)
-                await message_field.fill(message)
-                logger.info("📨 Сопроводительное письмо вставлено.")
-            except Exception as e:
-                logger.error(f"❌ Не удалось заполнить поле: {e}")
-                # Даже если не удалось заполнить, может быть кнопка отправки без письма? Нет, письмо требуется.
+            if not letter_field:
+                # Финальные проверки
+                if await self._is_test_modal(page):
+                    logger.warning("🧪 Обнаружен тест")
+                    return 'test_required'
+                if await self._has_success_marker(page):
+                    logger.info("ℹ️ Отклик отправлен без письма")
+                    return 'wo_soprovod'
+                logger.error("❌ Ни поля письма, ни признаков успеха")
+                await self._dump_page_debug(page, "no_field_no_success")
                 return 'failed'
 
-            # Ищем кнопку отправки письма (расширенный список селекторов)
-            submit_button_selectors = [
-                'button[data-qa="vacancy-response-letter-submit"]',
-                'button[type="submit"]',
-                'input[type="submit"]',
-                'button:has-text("Отправить")',
-                'button:has-text("Откликнуться")',
-            ]
+            # Заполняем письмо
+            try:
+                await letter_field.click()
+                await asyncio.sleep(0.5)
+                await letter_field.fill(message)
+                logger.info("📨 Письмо вставлено")
+            except Exception as e:
+                logger.error(f"❌ Не удалось заполнить поле: {e}")
+                return 'failed'
+
+            # Кнопка отправки
             submit_button = None
-            for selector in submit_button_selectors:
-                btn = page.locator(selector).first
+            for sel in SUBMIT_POPUP_SELECTORS:
+                btn = page.locator(sel).first
                 if await btn.count() > 0 and await btn.is_visible():
                     submit_button = btn
-                    logger.info(f"✅ Кнопка отправки найдена по селектору: {selector}")
+                    logger.info(f"✅ Кнопка отправки: {sel}")
                     break
 
             if not submit_button:
-                logger.error("❌ Кнопка отправки письма не найдена")
-                # Возможно, отклик уже отправлен без подтверждения? Проверяем успех
-                if await page.locator(success_selector).count() > 0:
-                    logger.info("ℹ️ Отклик отправлен без явного подтверждения.")
-                    return 'success'  # или wo_soprovod? Но письмо было вставлено, так что success.
+                if await self._has_success_marker(page):
+                    return 'success'
+                logger.error("❌ Кнопка отправки не найдена")
                 return 'failed'
 
-            logger.info("🖱️ Нажимаем кнопку отправки")
             await submit_button.click()
             await asyncio.sleep(3)
 
-            # Проверяем успех
-            if await page.locator('textarea[name="text"]').count() == 0:
-                logger.info("🎉 Поле ввода исчезло – отклик успешно отправлен")
-                return 'success'
+            # --- ПРОВЕРКИ ПОСЛЕ SUBMIT ---
+            if await self._is_test_modal(page):
+                logger.warning("🧪 После submit всплыл тест — отклик НЕ отправлен")
+                await self._dump_page_debug(page, "test_after_submit")
+                return 'test_required'
 
-            try:
-                await page.wait_for_selector(success_selector, state="visible", timeout=5000)
+            if await self._has_success_marker(page):
                 logger.info("🎉 Отклик подтверждён")
                 return 'success'
-            except Exception:
-                error_elem = page.locator('div[data-qa="vacancy-response-error"]')
-                if await error_elem.count() > 0:
-                    error_text = await error_elem.text_content()
-                    logger.error(f"❌ Ошибка при отклике: {error_text}")
-                    return 'failed'
-                else:
-                    logger.warning("⚠️ Не дождались подтверждения, но ошибка не обнаружена – считаем успехом")
-                    return 'success'
+
+            if await page.locator('div[data-qa="vacancy-response-error"]').count() > 0:
+                logger.error("❌ HH показал ошибку отклика")
+                return 'failed'
+
+            logger.error("❌ Ни успеха, ни теста, ни ошибки — неясный результат")
+            await self._dump_page_debug(page, "unclear_result")
+            return 'failed'
 
         except Exception as e:
             logger.error(f"💥 Ошибка при отклике на {vacancy_url}: {e}")
             return 'failed'
         finally:
             await page.close()
-    # async def respond_to_vacancy(
-    #         self, vacancy_url: str, resume_id: str, message: str, context: BrowserContext
-    # ) -> str:
-    #     """
-    #     Возвращает:
-    #     - 'success' – отклик отправлен с письмом
-    #     - 'wo_soprovod' – отклик отправлен, но письмо не вставлено
-    #     - 'failed' – ошибка (кнопка не найдена, форма не открылась и т.п.)
-    #     """
-    #     page = await context.new_page()
-    #     try:
-    #         logger.info(f"➡️ Переходим на страницу вакансии: {vacancy_url}")
-    #         await page.goto(vacancy_url, wait_until="domcontentloaded", timeout=60000)
-    #         await self._handle_dialogs(page)
-    #
-    #         logger.info("🔍 Ищем кнопку отклика...")
-    #         respond_button = page.locator('a[data-qa="vacancy-response-link-top"]').first
-    #         if await respond_button.count() == 0:
-    #             respond_button = page.locator('a[data-qa="vacancy-response-link-bottom"]').first
-    #         if await respond_button.count() == 0:
-    #             logger.warning(f"❌ Кнопка отклика не найдена на {vacancy_url}")
-    #             return 'failed'
-    #
-    #         logger.info("✅ Кнопка найдена, кликаем...")
-    #         await respond_button.click(no_wait_after=True)
-    #         logger.info("✅ Кнопка нажата, ожидаем появления поля ввода...")
-    #
-    #         # Проверяем iframe
-    #         frame = await self._check_iframe(page)
-    #         page_for_field = frame if frame else page
-    #
-    #         await asyncio.sleep(2)
-    #         message_field = await self._find_message_field(page_for_field)
-    #
-    #         # Если поле не появилось, проверяем, не отправился ли отклик без письма
-    #         if not message_field:
-    #             success_selector = 'div[data-qa="vacancy-response-success"]'
-    #             if await page.locator(success_selector).count() > 0:
-    #                 logger.info("ℹ️ Отклик отправлен без сопроводительного письма.")
-    #                 return 'wo_soprovod'
-    #
-    #             # Возможно, нужно выбрать резюме
-    #             resume_selector = 'div[data-qa="resume-selector"]'
-    #             if await page.locator(resume_selector).count() > 0:
-    #                 logger.info("🔍 Появился выбор резюме, ищем нужное...")
-    #                 resume_radio = page.locator(f'input[type="radio"][value="{resume_id}"]')
-    #                 if await resume_radio.count() > 0:
-    #                     await resume_radio.click()
-    #                 else:
-    #                     first_radio = page.locator('input[type="radio"][name="resume"]').first
-    #                     if await first_radio.count() > 0:
-    #                         await first_radio.click()
-    #                     else:
-    #                         logger.error("❌ Нет доступных резюме для выбора")
-    #                         return 'failed'
-    #
-    #                 await asyncio.sleep(1)
-    #                 message_field = await self._find_message_field(page_for_field)
-    #                 if not message_field:
-    #                     if await page.locator(success_selector).count() > 0:
-    #                         logger.info("ℹ️ Отклик отправлен без сопроводительного письма.")
-    #                         return 'wo_soprovod'
-    #                     else:
-    #                         logger.error("❌ После выбора резюме поле не появилось.")
-    #                         return 'failed'
-    #             else:
-    #                 # Проверяем, есть ли кнопка отправки без поля
-    #                 submit_btn = page.locator('button[data-qa="vacancy-response-letter-submit"]').first
-    #                 if await submit_btn.count() > 0 and await submit_btn.is_visible():
-    #                     logger.warning(
-    #                         "⚠️ Поле ввода не найдено, но кнопка отправки есть. Пробуем отправить без письма.")
-    #                     await submit_btn.click()
-    #                     await asyncio.sleep(3)
-    #                     if await page.locator(success_selector).count() > 0:
-    #                         logger.info("🎉 Отклик отправлен без письма (успех)")
-    #                         return 'wo_soprovod'
-    #                     else:
-    #                         logger.error("❌ Не удалось отправить отклик без письма.")
-    #                         return 'failed'
-    #                 else:
-    #                     logger.error("❌ Поле ввода не появилось, и нет других признаков успеха.")
-    #                     return 'failed'
-    #
-    #         # Поле найдено – заполняем
-    #         try:
-    #             await message_field.click()
-    #             await asyncio.sleep(0.5)
-    #             await message_field.fill(message)
-    #             logger.info("📨 Сопроводительное письмо вставлено.")
-    #         except Exception as e:
-    #             logger.error(f"❌ Не удалось заполнить поле: {e}")
-    #             return 'failed'
-    #
-    #         # Отправляем
-    #         submit_button = page.locator('button[data-qa="vacancy-response-letter-submit"]')
-    #         if await submit_button.count() == 0:
-    #             logger.error("❌ Кнопка отправки письма не найдена")
-    #             return 'failed'
-    #
-    #         logger.info("🖱️ Нажимаем кнопку отправки")
-    #         await submit_button.first.click()
-    #         await asyncio.sleep(3)
-    #
-    #         # Проверяем успех
-    #         if await page.locator('textarea[name="text"]').count() == 0:
-    #             logger.info("🎉 Поле ввода исчезло – отклик успешно отправлен")
-    #             return 'success'
-    #
-    #         try:
-    #             await page.wait_for_selector('div[data-qa="vacancy-response-success"]', state="visible", timeout=5000)
-    #             logger.info("🎉 Отклик подтверждён")
-    #             return 'success'
-    #         except Exception:
-    #             error_elem = page.locator('div[data-qa="vacancy-response-error"]')
-    #             if await error_elem.count() > 0:
-    #                 error_text = await error_elem.text_content()
-    #                 logger.error(f"❌ Ошибка при отклике: {error_text}")
-    #                 return 'failed'
-    #             else:
-    #                 logger.warning("⚠️ Не дождались подтверждения, но ошибка не обнаружена – считаем успехом")
-    #                 return 'success'
-    #
-    #     except Exception as e:
-    #         logger.error(f"💥 Ошибка при отклике на {vacancy_url}: {e}")
-    #         return 'failed'
-    #     finally:
-    #         await page.close()
-
-    # async def respond_to_vacancy(
-    #         self, vacancy_url: str, resume_id: str, message: str, context: BrowserContext
-    # ) -> bool:
-    #     page = await context.new_page()
-    #     try:
-    #         logger.info(f"➡️ Переходим на страницу вакансии: {vacancy_url}")
-    #         await page.goto(vacancy_url, wait_until="domcontentloaded", timeout=60000)
-    #
-    #         # Закрываем возможные диалоги
-    #         await self._handle_dialogs(page)
-    #
-    #         # Ищем кнопку отклика (верхнюю или нижнюю)
-    #         logger.info("🔍 Ищем кнопку отклика...")
-    #         respond_button = page.locator('a[data-qa="vacancy-response-link-top"]').first
-    #         if await respond_button.count() == 0:
-    #             respond_button = page.locator('a[data-qa="vacancy-response-link-bottom"]').first
-    #         if await respond_button.count() == 0:
-    #             logger.warning(f"❌ Кнопка отклика не найдена на {vacancy_url}")
-    #             return False
-    #
-    #         logger.info("✅ Кнопка найдена, кликаем...")
-    #         await respond_button.click(no_wait_after=True)
-    #         logger.info("✅ Кнопка нажата, ожидаем появления поля ввода...")
-    #
-    #         # Проверяем, не в iframe ли открылась форма
-    #         frame = await self._check_iframe(page)
-    #         if frame:
-    #             # Дальше работаем с фреймом
-    #             page_for_field = frame
-    #         else:
-    #             page_for_field = page
-    #
-    #         # Пытаемся найти поле ввода
-    #         await asyncio.sleep(2)  # небольшая пауза для загрузки формы
-    #         message_field = await self._find_message_field(page_for_field)
-    #
-    #         if not message_field:
-    #             # Если поле не найдено, возможно, отклик уже был отправлен без письма
-    #             success_selector = 'div[data-qa="vacancy-response-success"]'
-    #             if await page.locator(success_selector).count() > 0:
-    #                 logger.info("ℹ️ Отклик уже был отправлен или отправлен без письма.")
-    #                 return True
-    #
-    #             # Возможно, требуется выбрать резюме
-    #             resume_selector = 'div[data-qa="resume-selector"]'
-    #             if await page.locator(resume_selector).count() > 0:
-    #                 logger.info("🔍 Появился выбор резюме, ищем нужное...")
-    #                 resume_radio = page.locator(f'input[type="radio"][value="{resume_id}"]')
-    #                 if await resume_radio.count() > 0:
-    #                     logger.info(f"✅ Выбираем резюме с id {resume_id}")
-    #                     await resume_radio.click()
-    #                 else:
-    #                     logger.warning(f"⚠️ Резюме {resume_id} не найдено, выбираем первое доступное")
-    #                     first_radio = page.locator('input[type="radio"][name="resume"]').first
-    #                     if await first_radio.count() > 0:
-    #                         await first_radio.click()
-    #                     else:
-    #                         logger.error("❌ Нет доступных резюме для выбора")
-    #                         return False
-    #
-    #                 # После выбора резюме снова ищем поле
-    #                 await asyncio.sleep(1)
-    #                 message_field = await self._find_message_field(page_for_field)
-    #                 if not message_field:
-    #                     if await page.locator(success_selector).count() > 0:
-    #                         logger.info("ℹ️ Отклик отправлен без сопроводительного письма.")
-    #                         return True
-    #                     else:
-    #                         logger.error("❌ После выбора резюме поле не появилось.")
-    #                         return False
-    #             else:
-    #                 # Проверим, есть ли кнопка отправки без поля (редко)
-    #                 submit_btn = page.locator('button[data-qa="vacancy-response-letter-submit"]').first
-    #                 if await submit_btn.count() > 0 and await submit_btn.is_visible():
-    #                     logger.warning(
-    #                         "⚠️ Поле ввода не найдено, но кнопка отправки есть. Пробуем отправить без письма.")
-    #                     await submit_btn.click()
-    #                     await asyncio.sleep(3)
-    #                     if await page.locator(success_selector).count() > 0:
-    #                         logger.info("🎉 Отклик отправлен без письма (успех)")
-    #                         return True
-    #                     else:
-    #                         logger.error("❌ Не удалось отправить отклик без письма.")
-    #                         return False
-    #                 else:
-    #                     logger.error("❌ Поле ввода не появилось, и нет других признаков успеха.")
-    #                     return False
-    #
-    #         # Поле найдено – активируем и заполняем
-    #         try:
-    #             await message_field.click()
-    #             await asyncio.sleep(0.5)
-    #             await message_field.fill(message)
-    #             logger.info("📨 Сопроводительное письмо вставлено.")
-    #         except Exception as e:
-    #             logger.error(f"❌ Не удалось заполнить поле: {e}")
-    #             return False
-    #
-    #         # Ищем кнопку отправки
-    #         submit_button = page.locator('button[data-qa="vacancy-response-letter-submit"]')
-    #         if await submit_button.count() == 0:
-    #             logger.error("❌ Кнопка отправки письма не найдена")
-    #             return False
-    #
-    #         logger.info("🖱️ Нажимаем кнопку отправки")
-    #         await submit_button.first.click()
-    #
-    #         # Даём время на отправку запроса
-    #         await asyncio.sleep(3)
-    #
-    #         # Проверяем, исчезло ли поле ввода (признак успешной отправки)
-    #         if await page.locator('textarea[name="text"]').count() == 0:
-    #             logger.info("🎉 Поле ввода исчезло – отклик успешно отправлен")
-    #             return True
-    #
-    #         # Если поле ещё на месте, пробуем дождаться подтверждения
-    #         try:
-    #             await page.wait_for_selector('div[data-qa="vacancy-response-success"]',
-    #                                          state="visible", timeout=5000)
-    #             logger.info("🎉 Отклик подтверждён")
-    #             return True
-    #         except Exception:
-    #             # Проверяем, нет ли сообщения об ошибке
-    #             error_elem = page.locator('div[data-qa="vacancy-response-error"]')
-    #             if await error_elem.count() > 0:
-    #                 error_text = await error_elem.text_content()
-    #                 logger.error(f"❌ Ошибка при отклике: {error_text}")
-    #                 return False
-    #             else:
-    #                 # Явной ошибки нет – скорее всего, отклик ушёл
-    #                 logger.warning("⚠️ Не дождались подтверждения, но ошибка не обнаружена – считаем успехом")
-    #                 return True
-    #
-    #     except Exception as e:
-    #         logger.error(f"💥 Ошибка при отклике на {vacancy_url}: {e}")
-    #         return False
-    #     finally:
-    #         await page.close()

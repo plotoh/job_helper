@@ -1,236 +1,175 @@
 #!/usr/bin/env python3
 """
-скрипт для тестирования отклика
+Скрипт для тестирования отклика с использованием тех же компонентов,
+что и основной воркер (BrowserManager + HHResponseService + message_generator).
 
-python hh_respond_test.py [--url URL] [--resume RESUME_ID] [--message "Текст"] [--cookies ФАЙЛ] [--headless]
-
-python scripts/test_respond.py --url 130807542 --headless
+Примеры:
+    python -m scripts.test_respond --url 137328128 --no-proxy
+    python -m scripts.test_respond --url 137328128 --gui --no-proxy
+    python -m scripts.test_respond --url 137328128 --template app/message_template.txt
+    python -m scripts.test_respond --url 137328128 --message "Здравствуйте! ..."
+    python -m scripts.test_respond --url 137328128 --vacancy-name "Backend-разработчик"
 """
+
+import sys
+from pathlib import Path
+
+project_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(project_root))
 
 import asyncio
 import logging
 import argparse
-from pathlib import Path
 
-from playwright.async_api import async_playwright, BrowserContext, TimeoutError as PlaywrightTimeoutError
+from app.config import settings
+from app.hh_client.browser_manager import BrowserManager
+from app.hh_client.hh_response import HHResponseService
+from app.hh_client.message_generator import generate_message
 
-
-def load_cookies_from_netscape(file_path: str) -> dict:
-    """
-    загружает cookies из файла в формате Netscape
-    возвращает словарь
-    """
-    cookies = {}
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-                parts = line.split('\t')
-                if len(parts) >= 7:
-                    # Формат: domain, flag, path, secure, expiration, name, value
-                    name = parts[5]
-                    value = parts[6]
-                    cookies[name] = value
-        logging.info(f"Есть {len(cookies)} cookies из {file_path}")
-    except Exception as e:
-        logging.error(f"Ошибка cookies - {file_path}: {e}")
-        raise
-    return cookies
-
-
-# ----------------------------------------------------------------------
-# 2. Сервис отклика (адаптирован из вашего HHResponseService)
-# ----------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 
 
-class HHResponseService:
-    async def respond_to_vacancy(
-            self, vacancy_url: str, resume_id: str, message: str, context: BrowserContext
-    ) -> bool:
-        page = await context.new_page()
-        try:
-            logger.info(f"➡️ Переходим на страницу вакансии: {vacancy_url}")
-            await page.goto(vacancy_url, wait_until="domcontentloaded", timeout=60000)
-
-            # Ищем кнопку отклика (верхнюю или нижнюю)
-            logger.info("🔍 Ищем кнопку отклика")
-            respond_button = page.locator('a[data-qa="vacancy-response-link-top"]').first
-            if await respond_button.count() == 0:
-                respond_button = page.locator('a[data-qa="vacancy-response-link-bottom"]').first
-            if await respond_button.count() == 0:
-                logger.warning(f"❌ Кнопка отклика не найдена на {vacancy_url}")
-                return False
-
-            logger.info("✅ Кнопка найдена")
-            # Кликаем и сразу начинаем ждать появления поля ввода
-            await respond_button.click(no_wait_after=True)
-            logger.info("✅ Кнопка нажата, жду поле ввода")
-
-            # --- Правильный селектор поля сопроводительного письма ---
-            message_field_selector = 'textarea[name="text"]'
-
-            try:
-                # Ждём, пока поле станет видимым
-                await page.wait_for_selector(message_field_selector, state="visible", timeout=15000)
-                logger.info("✅ Поле ввода появилось.")
-            except PlaywrightTimeoutError:
-                # Если поле не появилось, возможно, отклик уже был отправлен без письма
-                success_selector = 'div[data-qa="vacancy-response-success"]'
-                if await page.locator(success_selector).count() > 0:
-                    logger.info("ℹ️ Отклик уже был отправлен или отправлен без письма.")
-                    return True
-
-                # Возможно, требуется выбрать резюме
-                resume_selector = 'div[data-qa="resume-selector"]'
-                if await page.locator(resume_selector).count() > 0:
-                    logger.info("🔍 Появился выбор резюме, ищем нужное")
-                    resume_radio = page.locator(f'input[type="radio"][value="{resume_id}"]')
-                    if await resume_radio.count() > 0:
-                        logger.info(f"✅ Выбираем резюме с id {resume_id}")
-                        await resume_radio.click()
-                    else:
-                        logger.warning(f"⚠️ Резюме {resume_id} не найдено, выбираем первое доступное")
-                        first_radio = page.locator('input[type="radio"][name="resume"]').first
-                        if await first_radio.count() > 0:
-                            await first_radio.click()
-                        else:
-                            logger.error("❌ Нет доступных резюме для выбора")
-                            return False
-
-                    # После выбора резюме снова ждём поле
-                    try:
-                        await page.wait_for_selector(message_field_selector, state="visible", timeout=10000)
-                        logger.info("✅ Поле ввода появилось после выбора резюме.")
-                    except PlaywrightTimeoutError:
-                        if await page.locator(success_selector).count() > 0:
-                            logger.info("ℹ️ Отклик отправлен без письма.")
-                            return True
-                        else:
-                            logger.error("❌ После выбора резюме поле сопровода не появилось.")
-                            return False
-                else:
-                    # Ничего не помогло
-                    logger.error("❌ Поле ввода не появилось, и нет других признаков успеха.")
-                    return False
-
-            # Поле найдено – получаем его и активируем кликом
-            message_field = page.locator(message_field_selector).first
-            await message_field.click()
-            await asyncio.sleep(0.5)  # небольшая пауза для активации
-            await message_field.fill(message)
-            logger.info("📨 Сопроводительное письмо вставлено.")
-
-            # Ищем кнопку отправки
-            submit_button = page.locator('button[data-qa="vacancy-response-letter-submit"]')
-            if await submit_button.count() == 0:
-                logger.error("❌ Кнопка отправки письма не найдена")
-                return False
-
-            logger.info("🖱️ Нажимаем кнопку отправки")
-            await submit_button.first.click()
-
-            # Ждём подтверждения отправки
-            try:
-                await page.wait_for_selector('div[data-qa="vacancy-response-success"]',
-                                             state="visible", timeout=10000)
-                logger.info(f"🎉 Отклик на {vacancy_url} отправлен успешно")
-                return True
-            except PlaywrightTimeoutError:
-                logger.error("❌ Не дождались подтверждения отправки")
-                return False
-
-        except Exception as e:
-            logger.error(f"💥 Ошибка при отклике на {vacancy_url}: {e}")
-            return False
-        finally:
-            await page.close()
-
-
-async def test_respond(vacancy_url: str, resume_id: str, message: str, cookies_file: str, headless: bool = False):
+def _build_message(args) -> str:
     """
-    Загружает cookies, создаёт контекст браузера и выполняет отклик.
+    Собирает финальный текст письма.
+    Приоритет:
+      1. --message (готовый текст, без генерации)
+      2. --template (путь к файлу шаблона) — генерируем через message_generator
+      3. settings.MESSAGE_TEMPLATE_FILE (если файл существует) — генерируем
+      4. Хардкод по умолчанию.
     """
-    cookies_dict = load_cookies_from_netscape(cookies_file)
+    vacancy_name = args.vacancy_name or f"вакансия {args.url}"
 
-    def load_playwright_cookies(file_path: str):
-        cookies_list = []
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith('#'):
-                        continue
-                    parts = line.split('\t')
-                    if len(parts) >= 7:
-                        domain = parts[0]
-                        path = parts[2]
-                        secure = parts[3].upper() == 'TRUE'  # TRUE/FALSE
-                        name = parts[5]
-                        value = parts[6]
-                        cookie = {
-                            "name": name,
-                            "value": value,
-                            "domain": domain,
-                            "path": path,
-                            "secure": secure,
-                            "httpOnly": False,
-                            "sameSite": "Lax",
-                        }
-                        cookies_list.append(cookie)
-            logger.info(f"Есть {len(cookies_list)} cookies из {file_path}")
-        except Exception as e:
-            logger.error(f"Ошибка  cookies - путь {file_path}: {e}")
-            raise
-        return cookies_list
+    if args.message:
+        logger.info("✉️ Использую готовый текст из --message (без генерации)")
+        return args.message
 
-    cookies = load_playwright_cookies(cookies_file)
+    # Определяем шаблон
+    template_path = None
+    if args.template:
+        template_path = Path(args.template)
+        if not template_path.exists():
+            logger.error(f"❌ Файл шаблона не найден: {template_path}")
+            sys.exit(1)
+    else:
+        default_path = Path(settings.MESSAGE_TEMPLATE_FILE)
+        if default_path.exists():
+            template_path = default_path
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
-        context = await browser.new_context()
+    if template_path is None:
+        logger.warning(
+            f"⚠️ Шаблон не найден (ни --template, ни {settings.MESSAGE_TEMPLATE_FILE}). "
+            f"Использую запасной текст."
+        )
+        return "Здравствуйте! Рассмотрите, пожалуйста, мою кандидатуру"
 
-        if cookies:
-            await context.add_cookies(cookies)
+    template = template_path.read_text(encoding="utf-8")
+    logger.info(f"📄 Шаблон загружен: {template_path}")
+
+    context = {
+        "vacancy_name": vacancy_name,
+        "tg_username": settings.TG_USERNAME,   # ← подтягивается из .env
+    }
+    logger.info(f"🔧 Контекст: vacancy_name={vacancy_name!r}, tg_username={settings.TG_USERNAME!r}")
+
+    message = generate_message(template, context)
+    logger.info(f"✉️ Сгенерированное письмо:\n{message}")
+    return message
+
+
+async def test_respond(
+        vacancy_url: str,
+        resume_id: str,
+        message: str,
+        cookies_file: str,
+        headless: bool = False,
+        use_proxy: bool = True,
+) -> str:
+    browser_manager = BrowserManager(headless=headless)
+    await browser_manager.start()
+    try:
+        if use_proxy and settings.PROXY_SERVER:
+            logger.info(f"🌐 Используется прокси из настроек: {settings.PROXY_SERVER}")
+            context = await browser_manager.create_context(cookies_source=cookies_file)
+        else:
+            # Пустой dict != None, поэтому глобальный прокси из settings не применится
+            context = await browser_manager.create_context(cookies_source=cookies_file, proxy={})
+            if use_proxy:
+                logger.info("🌐 Прокси не задан в настройках, работаем напрямую")
+            else:
+                logger.info("🚫 Прокси отключён (--no-proxy)")
 
         responder = HHResponseService()
-        success = await responder.respond_to_vacancy(
+        status = await responder.respond_to_vacancy(
             vacancy_url=f"https://hh.ru/vacancy/{vacancy_url}",
             resume_id=resume_id,
             message=message,
-            context=context
+            context=context,
         )
-
-        await browser.close()
-        return success
+        return status
+    finally:
+        await browser_manager.stop()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="тестирование отклика")
-    parser.add_argument("--url", required=True, help="вакансия")
-    parser.add_argument("--resume", default="41bf6a4cff103235840039ed1f44433836306e")
-    parser.add_argument("--message", default="Здравствуйте! Рассмотрите, пожалуйста, мою кандидатуру")
-    parser.add_argument("--cookies", default="cookies/peyego1one.txt")
-    parser.add_argument("--headless", action="store_true", help="фоновый режим(без GUI)")
+    parser = argparse.ArgumentParser(description="Тестирование отклика")
+
+    parser.add_argument("--url", required=True, help="ID вакансии (например, 137328128)")
+    parser.add_argument("--resume", default="41bf6a4cff103235840039ed1f44433836306e",
+                        help="ID резюме hh.ru")
+    parser.add_argument("--cookies", default="cookies/peyego1one.txt",
+                        help="Путь к файлу cookies")
+
+    # Взаимоисключающие способы задать письмо:
+    msg_group = parser.add_mutually_exclusive_group()
+    msg_group.add_argument("--message", default=None,
+                           help="Готовый текст письма (без генерации)")
+    msg_group.add_argument("--template", default=None,
+                           help="Путь к файлу шаблона (сгенерируется через message_generator)")
+
+    parser.add_argument("--vacancy-name", default=None,
+                        help="Название вакансии для подстановки {vacancy_name} в шаблон")
+
+    parser.add_argument("--no-proxy", action="store_true", help="Отключить прокси для этого запуска")
+    parser.add_argument("--gui", action="store_true", help="Показать браузер (не headless)")
 
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
 
-    result = asyncio.run(test_respond(
+    headless = not args.gui
+    use_proxy = not args.no_proxy
+
+    logger.info(
+        f"Запуск теста. URL: {args.url}, headless={headless}, "
+        f"proxy={'off' if args.no_proxy else 'on'}, tg_username={settings.TG_USERNAME!r}"
+    )
+
+    try:
+        message = _build_message(args)
+    except SystemExit:
+        return
+
+    status = asyncio.run(test_respond(
         vacancy_url=args.url,
         resume_id=args.resume,
-        message=args.message,
+        message=message,
         cookies_file=args.cookies,
-        headless=args.headless
+        headless=headless,
+        use_proxy=use_proxy,
     ))
 
-    if result:
-        logging.info("✅ cкрипт завершился успешно")
+    if status == "success":
+        logger.info("✅ Отклик с сопроводительным письмом отправлен")
+    elif status == "wo_soprovod":
+        logger.warning("⚠️ Отклик без сопроводительного письма")
+    elif status == "test_required":
+        logger.warning("🧪 Требуется тест от работодателя")
     else:
-        logging.error("❌ cкрипт завершился с ошибкой")
+        logger.error(f"❌ Отклик не удался (status={status})")
 
 
 if __name__ == "__main__":
