@@ -54,11 +54,15 @@ class Settings(BaseSettings):
     DAILY_LIMIT_MIN: int = 53
     DAILY_LIMIT_MAX: int = 97
 
+    # Не тратить отклики на вакансии, где другой аккаунт уже получил test_required
+    SKIP_TEST_REQUIRED_BY_OTHERS: bool = True
+
     # Прокси (опционально)
     PROXY_SERVER: Optional[str] = None  # например "http://proxy.example.com:8080"
     PROXY_USERNAME: Optional[str] = None
     PROXY_PASSWORD: Optional[str] = None
 
+    RESPOND_TO_OTHER_COUNTRY: bool = True
     DAILY_PARSING_LIMIT: int = 100
     VACANCY_TTL_DAYS: int = 7
     MAX_USES_PER_VACANCY: int = 2
@@ -69,7 +73,7 @@ class Settings(BaseSettings):
     # Логирование
     LOG_LEVEL: str = "DEBUG"
 
-    BOT_ENABLED: bool = True  # по умолчанию включён
+    BOT_ENABLED: bool = False  # по умолчанию включён
 
     @computed_field
     @property

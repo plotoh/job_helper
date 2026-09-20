@@ -16,8 +16,6 @@ from app.db import (
     ParsingLog,
     VacancyRepository,
     FilteredOutVacancy,
-    JuniorVacancy,
-    SeniorVacancy,
 )
 from app.hh_client.detail_parser import HHVacancyDetailParser
 from app.hh_client.list_parser import HHVacancyListParser

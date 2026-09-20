@@ -81,6 +81,8 @@ async def test_vacancy_repo_get_random_unresponded(session: AsyncSession, test_a
     await session.commit()
 
     repo = VacancyRepository(session)
-    result = await repo.get_random_unresponded(test_account.id)
+    result = await repo.get_random_unresponded(
+        test_account.id, include_junior=True, include_senior=True
+    )
     assert result is not None
     assert result.hh_id == "test123"

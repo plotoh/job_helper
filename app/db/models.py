@@ -5,15 +5,8 @@ from sqlalchemy import Column, String, Integer, Boolean, DateTime, ForeignKey, J
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.sql import func
 import json
-import enum
 
 Base = declarative_base()
-
-
-class VacancyLevel(str, enum.Enum):
-    REGULAR = 'regular'
-    JUNIOR = 'JUNIOR'
-    SENIOR = 'SENIOR'
 
 
 class Vacancy(Base):
@@ -33,6 +26,7 @@ class Vacancy(Base):
     description = Column(Text, nullable=True)  # полное описание вакансии
     score = Column(Integer, default=0)
     level = Column(String(20), nullable=False, default='regular')
+
 
 class Account(Base):
     __tablename__ = 'accounts'
@@ -121,29 +115,29 @@ class FilteredOutVacancy(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 
-class JuniorVacancy(Base):
-    __tablename__ = 'junior_vacancies'
-
-    hh_id = Column(String, primary_key=True)
-    title = Column(String, nullable=False)
-    url = Column(String, nullable=False)
-    created_at = Column(DateTime, server_default=func.now())
-    score = Column(Integer, default=0)  # <-- добавить
-    is_actual = Column(Boolean, default=True)  # <-- добавить
-    used_count = Column(Integer, default=0)  # <-- добавить
-
-
-class SeniorVacancy(Base):
-    __tablename__ = 'senior_vacancies'
-
-    hh_id = Column(String, primary_key=True)
-    title = Column(String, nullable=False)
-    url = Column(String, nullable=False)
-    created_at = Column(DateTime, server_default=func.now())
-
-    score = Column(Integer, default=0)  # <-- добавить
-    is_actual = Column(Boolean, default=True)  # <-- добавить
-    used_count = Column(Integer, default=0)  # <-- добавить
+# class JuniorVacancy(Base):
+#     __tablename__ = 'junior_vacancies'
+#
+#     hh_id = Column(String, primary_key=True)
+#     title = Column(String, nullable=False)
+#     url = Column(String, nullable=False)
+#     created_at = Column(DateTime, server_default=func.now())
+#     score = Column(Integer, default=0)  # <-- добавить
+#     is_actual = Column(Boolean, default=True)  # <-- добавить
+#     used_count = Column(Integer, default=0)  # <-- добавить
+#
+#
+# class SeniorVacancy(Base):
+#     __tablename__ = 'senior_vacancies'
+#
+#     hh_id = Column(String, primary_key=True)
+#     title = Column(String, nullable=False)
+#     url = Column(String, nullable=False)
+#     created_at = Column(DateTime, server_default=func.now())
+#
+#     score = Column(Integer, default=0)  # <-- добавить
+#     is_actual = Column(Boolean, default=True)  # <-- добавить
+#     used_count = Column(Integer, default=0)  # <-- добавить
 
 
 class Setting(Base):

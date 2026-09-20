@@ -36,7 +36,8 @@ services:
       DB_USER: user
       DB_PASSWORD: pass
       TG_USERNAME: ${TG_USERNAME}
-      HH_SEARCH_URL: "https://hh.ru/search/vacancy?text=Python+разработчик&from=suggest_post&salary=&ored_clusters=true&suggestId=079455f9-0a43-4337-8a55-96f0dcd2ffda&hhtmFrom=vacancy_search_list&hhtmFromLabel=vacancy_search_suggest"
+      HH_SEARCH_URL: ${HH_SEARCH_URL}
+      VACANCY_TTL_DAYS: ${VACANCY_TTL_DAYS}
       MAX_PAGES: 2
       MAX_CONCURRENT: 5
       COOKIES_DIR: /app/cookies

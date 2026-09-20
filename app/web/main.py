@@ -297,6 +297,7 @@ async def api_stats():
                 "limit": state.daily_limit if state else "?",
                 "status": state.status if state else "no data",
                 "pause_until": state.pause_until.isoformat() if state and state.pause_until else None,
+                "manual_override": bool(state.manual_override) if state else False,  # <-- новое
             })
 
         return {
@@ -337,8 +338,9 @@ async def api_account_history(account_id: int, limit: int = 20):
         }
 
 
-@app.post("/api/accounts/{account_id}/resume")
-async def api_resume_account(account_id: int):
+@app.post("/api/accounts/{account_id}/schedule")
+async def api_schedule_account(account_id: int):
+    """Вернуть аккаунт в обычный режим: уважать расписание и паузы."""
     today = msk_now().date()
     async with AsyncSessionLocal() as session:
         repo = AccountStateRepository(session)
@@ -347,13 +349,31 @@ async def api_resume_account(account_id: int):
             raise HTTPException(status_code=404, detail="Account state not found")
         state.status = 'active'
         state.pause_until = None
-        state.manual_override = True  # <-- ключевое: игнорируем расписание и паузы
+        state.manual_override = False
         await session.commit()
-        return {"status": "ok"}
+        return {"status": "ok", "mode": "schedule"}
+
+
+@app.post("/api/accounts/{account_id}/manual")
+async def api_manual_account(account_id: int, enabled: bool = Query(...)):
+    """Включить/выключить ручной override (игнорировать расписание и паузы)."""
+    today = msk_now().date()
+    async with AsyncSessionLocal() as session:
+        repo = AccountStateRepository(session)
+        state = await repo.get_for_today(account_id, today)
+        if not state:
+            raise HTTPException(status_code=404, detail="Account state not found")
+        state.manual_override = enabled
+        if enabled:
+            state.status = 'active'
+            state.pause_until = None
+        await session.commit()
+        return {"status": "ok", "manual_override": enabled}
 
 
 @app.post("/api/accounts/{account_id}/pause")
 async def api_pause_account(account_id: int, request: PauseRequest):
+    """Поставить на паузу (уважая расписание в остальное время)."""
     today = msk_now().date()
     async with AsyncSessionLocal() as session:
         repo = AccountStateRepository(session)
@@ -366,38 +386,25 @@ async def api_pause_account(account_id: int, request: PauseRequest):
             pause_until = msk_now() + timedelta(minutes=request.duration_minutes)
         state.status = 'paused'
         state.pause_until = pause_until
-        state.manual_override = False  # <-- возвращаем обычное расписание
+        state.manual_override = False
         await session.commit()
         return {"status": "ok", "pause_until": pause_until.isoformat()}
 
 
-# @app.post("/api/accounts/{account_id}/pause")
-# async def api_pause_account(account_id: int, request: PauseRequest):
-#     """Поставить аккаунт на паузу."""
-#     today = msk_now().date()
-#     async with AsyncSessionLocal() as session:
-#         repo = AccountStateRepository(session)
-#         state = await repo.get_for_today(account_id, today)
-#         if not state:
-#             raise HTTPException(status_code=404, detail="Account state not found")
-#
-#         if request.duration_minutes is None:
-#             pause_until = msk_now() + timedelta(days=365)  # бессрочно
-#         else:
-#             pause_until = msk_now() + timedelta(minutes=request.duration_minutes)
-#
-#         await repo.update_status(account_id, today, 'paused', pause_until=pause_until)
-#         return {"status": "ok", "pause_until": pause_until.isoformat()}
-#
-#
-# @app.post("/api/accounts/{account_id}/resume")
-# async def api_resume_account(account_id: int):
-#     """Снять паузу с аккаунта."""
-#     today = msk_now().date()
-#     async with AsyncSessionLocal() as session:
-#         repo = AccountStateRepository(session)
-#         await repo.update_status(account_id, today, 'active', pause_until=None)
-#         return {"status": "ok"}
+@app.post("/api/accounts/{account_id}/resume")
+async def api_resume_account(account_id: int):
+    """Снять паузу, вернуться в обычный режим расписания (НЕ включает override)."""
+    today = msk_now().date()
+    async with AsyncSessionLocal() as session:
+        repo = AccountStateRepository(session)
+        state = await repo.get_for_today(account_id, today)
+        if not state:
+            raise HTTPException(status_code=404, detail="Account state not found")
+        state.status = 'active'
+        state.pause_until = None
+        state.manual_override = False  # <-- ключевое: вернуть к расписанию
+        await session.commit()
+        return {"status": "ok", "mode": "schedule"}
 
 
 @app.post("/api/settings/responses/enable")

@@ -269,7 +269,7 @@ class HHResponseService(IResponseService):
             # --- ГЛАВНАЯ ПРОВЕРКА: тест? ---
             if await self._is_test_modal(page):
                 logger.warning("🧪 Открылся тест — отклик НЕ отправлен, возвращаем test_required")
-                await self._dump_page_debug(page, "test_modal")
+                # await self._dump_page_debug(page, "test_modal")
                 return 'test_required'
 
             # --- Отклик ушёл без модалки → "Приложить письмо" ---
@@ -347,7 +347,7 @@ class HHResponseService(IResponseService):
             # --- ПРОВЕРКИ ПОСЛЕ SUBMIT ---
             if await self._is_test_modal(page):
                 logger.warning("🧪 После submit всплыл тест — отклик НЕ отправлен")
-                await self._dump_page_debug(page, "test_after_submit")
+                # await self._dump_page_debug(page, "test_after_submit")
                 return 'test_required'
 
             if await self._has_success_marker(page):
