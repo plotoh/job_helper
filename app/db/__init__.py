@@ -1,5 +1,4 @@
 # app/db/__init__.py
-
 from .database import AsyncSessionLocal, init_db
 from .models import (
     Base,
@@ -8,12 +7,16 @@ from .models import (
     AccountVacancy,
     ResponseError,
     AccountDailyState,
-    ParsingLog, FilteredOutVacancy)
+    ParsingLog,
+    ParsingProgress,
+    FilteredOutVacancy,
+    Setting,
+)
 from app.db.repositories.vacancy_repo import VacancyRepository
 from app.db.repositories.account_state_repo import AccountStateRepository
+from app.db.repositories.account_repo import AccountRepository
 from app.db.repositories.response_error_repo import ResponseErrorRepository
 from app.db.repositories.parsing_progress_repo import ParsingProgressRepository
-
 
 __all__ = [
     "AsyncSessionLocal",
@@ -25,9 +28,12 @@ __all__ = [
     "ResponseError",
     "AccountDailyState",
     "ParsingLog",
+    "ParsingProgress",
+    "FilteredOutVacancy",
+    "Setting",
     "VacancyRepository",
+    "AccountRepository",
     "AccountStateRepository",
     "ResponseErrorRepository",
     "ParsingProgressRepository",
-    "FilteredOutVacancy",
 ]

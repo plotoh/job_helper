@@ -28,13 +28,39 @@ class Vacancy(Base):
     level = Column(String(20), nullable=False, default='regular')
 
 
+# app/db/models.py
+
 class Account(Base):
     __tablename__ = 'accounts'
 
-    id = Column(BigInteger, primary_key=True)  ## tg_id
+    id = Column(BigInteger, primary_key=True)               # tg_id
     tg_username = Column(String, unique=True, nullable=True)
-    created_at = Column(DateTime, server_default=func.now())
     resume_id = Column(String, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+    # --- Активация ---
+    is_enabled = Column(Boolean, default=True, server_default='true')
+
+    # --- Прокси (пусто = fallback на глобальный из settings) ---
+    proxy_server = Column(String, nullable=True)
+    proxy_username = Column(String, nullable=True)
+    proxy_password = Column(String, nullable=True)
+
+    # --- Рабочее расписание ---
+    work_start_hour = Column(Integer, nullable=True)         # NULL = брать из settings
+    work_start_minute = Column(Integer, nullable=True)
+    work_end_hour = Column(Integer, nullable=True)
+    work_end_minute = Column(Integer, nullable=True)
+
+    # --- Паузы ---
+    pause_count = Column(Integer, nullable=True)
+    pause_min_minutes = Column(Integer, nullable=True)
+    pause_max_minutes = Column(Integer, nullable=True)
+    min_gap_minutes = Column(Integer, nullable=True)
+
+    # --- Дневной лимит ---
+    daily_limit_min = Column(Integer, nullable=True)
+    daily_limit_max = Column(Integer, nullable=True)
 
 
 class AccountVacancy(Base):

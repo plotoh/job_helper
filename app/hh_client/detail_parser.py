@@ -1,8 +1,13 @@
+# app/hh_client/detail_parser.py
 import asyncio
 import logging
 import re
+from datetime import datetime
+from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
+
 from playwright.async_api import BrowserContext
+
 from app.hh_client.interfaces import IVacancyDetailParser
 
 logger = logging.getLogger(__name__)
@@ -25,7 +30,6 @@ def _parse_experience(exp_text: str) -> Optional[Tuple[int, int]]:
 
 class HHVacancyDetailParser(IVacancyDetailParser):
     async def _handle_dialogs(self, page):
-        """Закрывает всплывающие окна (регион, куки)"""
         try:
             region_confirm = page.locator('button[data-qa="confirm-phone-region"]')
             if await region_confirm.count() > 0:
@@ -38,19 +42,54 @@ class HHVacancyDetailParser(IVacancyDetailParser):
         except Exception:
             pass
 
+    async def _dump_page_debug(self, page, url: str):
+        debug_dir = Path("logs/debug")
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        m = re.search(r'/vacancy/(\d+)', url)
+        vac_id = m.group(1) if m else "unknown"
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        html_path = debug_dir / f"{ts}_detail_fail_{vac_id}.html"
+        try:
+            html = await page.content()
+            html_path.write_text(html, encoding="utf-8")
+            logger.info(f"🖼️ Debug сохранён: {html_path.name}")
+        except Exception as e:
+            logger.warning(f"Не удалось сохранить debug: {e}")
+
     async def parse(self, url: str, context: BrowserContext) -> Dict[str, Any]:
         details = {
             "salary": None,
             "experience": None,
             "work_format": None,
-            "skills": []
+            "skills": [],
+            "description": None,
         }
         page = await context.new_page()
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await self._handle_dialogs(page)
-            await page.wait_for_selector('[data-qa="vacancy-title"]', timeout=15000, state="visible")
-            await asyncio.sleep(2)
+
+            # --- Ожидаем заголовок по одному из селекторов ---
+            title_found = False
+            for sel in [
+                '[data-qa="vacancy-title"]',
+                'h1[data-qa="vacancy-title"]',
+                'h1.bloko-header-section-1',
+                'h1',
+            ]:
+                try:
+                    await page.wait_for_selector(sel, timeout=10000, state="visible")
+                    title_found = True
+                    break
+                except Exception:
+                    continue
+
+            if not title_found:
+                logger.warning(f"Заголовок не найден на {url} — вероятно архив или регион")
+                await self._dump_page_debug(page, url)
+                return details
+
+            await asyncio.sleep(1.5)
 
             # Зарплата
             salary_elem = page.locator('[data-qa="vacancy-salary"]')
@@ -62,8 +101,7 @@ class HHVacancyDetailParser(IVacancyDetailParser):
             exp_elem = page.locator('[data-qa="vacancy-experience"]')
             if await exp_elem.count() > 0:
                 exp_text = await exp_elem.text_content()
-                details["experience"] = _parse_experience(exp_text)  # может вернуть None или кортеж
-            # иначе остаётся None
+                details["experience"] = _parse_experience(exp_text)
 
             # Формат работы
             format_elem = page.locator('[data-qa="vacancy-employment-mode"]')
@@ -76,11 +114,12 @@ class HHVacancyDetailParser(IVacancyDetailParser):
                 for i in range(count):
                     item = info_items.nth(i)
                     text = await item.text_content()
-                    if text and ("удален" in text.lower() or "гибрид" in text.lower() or "офис" in text.lower()):
+                    if text and ("удален" in text.lower() or "гибрид" in text.lower()
+                                 or "офис" in text.lower()):
                         details["work_format"] = text.strip()
                         break
 
-            # Навыки – всегда список
+            # Навыки
             skill_list = page.locator('[data-qa="vacancy-skill-list"]')
             if await skill_list.count() > 0:
                 skill_items = skill_list.locator('[data-qa="bloko-tag__text"]')
@@ -97,27 +136,11 @@ class HHVacancyDetailParser(IVacancyDetailParser):
                     if skill_text:
                         details["skills"].append(skill_text.strip())
 
-            # в конце блока парсинга, перед возвратом:
+            # Описание
             desc_elem = page.locator('[data-qa="vacancy-description"]')
             if await desc_elem.count() > 0:
                 description = await desc_elem.text_content()
                 details["description"] = description.strip() if description else None
-            else:
-                details["description"] = None
-            # # Дата публикации
-            # pub_elem = page.locator('[data-qa="vacancy-published-at"]')
-            # if await pub_elem.count() > 0:
-            #     pub_text: str | None = await pub_elem.text_content()
-            #     if pub_text:
-            #         # Пример: "10 марта 2025" – нужно распарсить
-            #         # Лучше использовать dateparser, но для простоты можно хранить как строку, но лучше datetime
-            #         # Пропустим парсинг, сохраним как есть, или воспользуемся готовым решением.
-            #         # Для демонстрации запишем текущее время, если не удалось распарсить.
-            #         details["published_at"] = pub_text.strip()
-            #     else:
-            #         details["published_at"] = None
-            # else:
-            #     details["published_at"] = None
 
         except Exception as e:
             logger.error(f"Ошибка при парсинге {url}: {e}")

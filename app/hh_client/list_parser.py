@@ -2,7 +2,9 @@
 import asyncio
 import logging
 from typing import List, Dict
-from playwright.async_api import BrowserContext
+from playwright.async_api import BrowserContext, TimeoutError as PlaywrightTimeoutError
+
+
 from app.hh_client.interfaces import IVacancyListParser
 
 logger = logging.getLogger(__name__)
@@ -18,7 +20,7 @@ class HHVacancyListParser(IVacancyListParser):
             await page_obj.goto(page_url, wait_until="domcontentloaded", timeout=30000)
             try:
                 await page_obj.wait_for_selector('[data-qa="vacancy-serp__vacancy"]', timeout=10000)
-            except:
+            except PlaywrightTimeoutError:
                 logger.warning("Карточки не найдены, страница пуста")
                 return []
             await asyncio.sleep(2)

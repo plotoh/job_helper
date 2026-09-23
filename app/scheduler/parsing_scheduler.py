@@ -105,18 +105,19 @@ class ParsingScheduler:
                 successful = [r for r in results if r is not None]
 
                 # Сохраняем
-                saved = 0
+                saved_this_page = 0
                 async with AsyncSessionLocal() as session:
                     repo = VacancyRepository(session)
                     for vac in successful:
-                        inserted = await repo.save_if_not_exists(vac)
+                        inserted = await repo.save_if_not_exists(vac, commit=False)
                         if inserted:
-                            saved += 1
+                            saved_this_page += 1
+                    await session.commit()
                     # Обновляем прогресс (чтобы в следующий раз начать со следующей страницы)
                     progress_repo = ParsingProgressRepository(session)
                     await progress_repo.update_last_page(settings.HH_SEARCH_URL, page)
-                    total_saved += saved
-                logger.info(f"Принудительно: страница {page} сохранено {saved} вакансий")
+                    total_saved += saved_this_page
+                logger.info(f"Принудительно: страница {page} сохранено {saved_this_page} вакансий")
 
             logger.info(f"✅ Принудительный парсинг завершён, сохранено {total_saved} вакансий")
         except Exception as e:
@@ -311,9 +312,10 @@ class ParsingScheduler:
                 async with AsyncSessionLocal() as session:
                     repo = VacancyRepository(session)
                     for vac in successful:
-                        inserted = await repo.save_if_not_exists(vac)
+                        inserted = await repo.save_if_not_exists(vac, commit=False)
                         if inserted:
                             saved_this_page += 1
+                    await session.commit()
                     logger.info(f"Page {next_page}: saved {saved_this_page} new vacancies")
                     total_saved += saved_this_page
 

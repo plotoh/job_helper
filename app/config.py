@@ -56,13 +56,13 @@ class Settings(BaseSettings):
 
     # Не тратить отклики на вакансии, где другой аккаунт уже получил test_required
     SKIP_TEST_REQUIRED_BY_OTHERS: bool = True
+    RESPOND_TO_OTHER_COUNTRY: bool = True
 
     # Прокси (опционально)
     PROXY_SERVER: Optional[str] = None  # например "http://proxy.example.com:8080"
     PROXY_USERNAME: Optional[str] = None
     PROXY_PASSWORD: Optional[str] = None
 
-    RESPOND_TO_OTHER_COUNTRY: bool = True
     DAILY_PARSING_LIMIT: int = 100
     VACANCY_TTL_DAYS: int = 7
     MAX_USES_PER_VACANCY: int = 2

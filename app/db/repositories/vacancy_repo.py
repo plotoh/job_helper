@@ -20,7 +20,7 @@ class VacancyRepository(IVacancyRepository):
     async def save_if_not_exists(self, vacancy: dict, commit: bool = True) -> bool:
         """
         :param commit: True — коммит сразу (для одиночных вызовов).
-                       False — коммит делает вызывающий (для батчевой вставки в _run_parsing).
+                       False — коммит делает вызывающий (для батчевой вставки).
         """
         stmt = select(Vacancy.hh_id).where(Vacancy.hh_id == vacancy['id'])
         result = await self.session.execute(stmt)
@@ -38,8 +38,10 @@ class VacancyRepository(IVacancyRepository):
                 logger.warning(f"Unexpected experience format for {vacancy['id']}: {exp}")
 
         # skills — уже list/None. JSON-колонка сериализует сама.
-        # json.dumps здесь давал двойную сериализацию → в БД лежала строка "[...]".
         skills = vacancy.get('skills') or []
+
+        # level — приводим к lowercase на всякий случай
+        level = (vacancy.get('level') or 'regular').lower()
 
         new_vac = Vacancy(
             hh_id=vacancy['id'],
@@ -52,7 +54,7 @@ class VacancyRepository(IVacancyRepository):
             score=vacancy.get('score', 0),
             skills=skills,
             is_actual=True,
-            level=vacancy.get('level', 'regular'),
+            level=level,
         )
         self.session.add(new_vac)
         if commit:
@@ -76,8 +78,6 @@ class VacancyRepository(IVacancyRepository):
         result = await self.session.execute(stmt)
         existing = result.scalar_one_or_none()
 
-        # datetime.now() — Python-значение. func.now() = SQL-функция,
-        # которую нельзя присваивать ORM-атрибуту без update().
         now = datetime.now()
         if existing:
             existing.responded = True
@@ -94,67 +94,6 @@ class VacancyRepository(IVacancyRepository):
         if commit:
             await self.session.commit()
 
-    async def is_test_required_by_any(self, hh_id: str) -> bool:
-        """True, если хоть один аккаунт уже получил test_required на эту вакансию."""
-        stmt = (
-            select(AccountVacancy.hh_id)
-            .where(
-                and_(
-                    AccountVacancy.hh_id == hh_id,
-                    AccountVacancy.response_status == 'test_required',
-                )
-            )
-            .limit(1)
-        )
-        result = await self.session.execute(stmt)
-        return result.scalar_one_or_none() is not None
-
-    # async def get_random_unresponded(
-    #         self,
-    #         account_id: int,
-    #         include_junior: bool,
-    #         include_senior: bool,
-    # ) -> Optional[Vacancy]:
-    #     """
-    #     NOT EXISTS вместо NOT IN (scalar_subquery) — на больших таблицах
-    #     PostgreSQL это значительно эффективнее.
-    #     """
-    #     cutoff = datetime.now() - timedelta(days=settings.VACANCY_TTL_DAYS)
-    #
-    #     allowed_levels = ['regular']
-    #     if include_junior:
-    #         allowed_levels.append('junior')
-    #     if include_senior:
-    #         allowed_levels.append('senior')
-    #
-    #     already = (
-    #         select(AccountVacancy.hh_id)
-    #         .where(
-    #             and_(
-    #                 AccountVacancy.account_id == account_id,
-    #                 AccountVacancy.hh_id == Vacancy.hh_id,
-    #             )
-    #         )
-    #         .exists()
-    #     )
-    #
-    #     stmt = (
-    #         select(Vacancy)
-    #         .where(
-    #             and_(
-    #                 ~already,
-    #                 Vacancy.is_actual.is_(True),
-    #                 Vacancy.used_count < settings.MAX_USES_PER_VACANCY,
-    #                 Vacancy.created_at >= cutoff,
-    #                 Vacancy.level.in_(allowed_levels),
-    #             )
-    #         )
-    #         .order_by(desc(Vacancy.score), desc(Vacancy.created_at))
-    #         .limit(1)
-    #     )
-    #     result = await self.session.execute(stmt)
-    #     return result.scalar_one_or_none()
-
     async def get_random_unresponded(
             self,
             account_id: int,
@@ -162,6 +101,11 @@ class VacancyRepository(IVacancyRepository):
             include_senior: bool,
             skip_test_required_by_others: bool = True,
     ) -> Optional[Vacancy]:
+        """
+        NOT EXISTS вместо NOT IN — эффективнее на больших объёмах.
+        with_for_update(skip_locked=True) — защита от гонки, когда два воркера
+        одновременно берут одну вакансию.
+        """
         cutoff = datetime.now() - timedelta(days=settings.VACANCY_TTL_DAYS)
 
         allowed_levels = ['regular']
@@ -205,11 +149,25 @@ class VacancyRepository(IVacancyRepository):
             .where(and_(*conditions))
             .order_by(desc(Vacancy.score), desc(Vacancy.created_at))
             .limit(1)
+            .with_for_update(skip_locked=True)
         )
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def increment_used_count(self, hh_id: str) -> int:
+    async def is_test_required_by_any(self, hh_id: str) -> bool:
+        """True, если хоть один аккаунт уже получил test_required на эту вакансию."""
+        stmt = (
+            select(AccountVacancy.hh_id)
+            .where(and_(
+                AccountVacancy.hh_id == hh_id,
+                AccountVacancy.response_status == 'test_required',
+            ))
+            .limit(1)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none() is not None
+
+    async def increment_used_count(self, hh_id: str, commit: bool = True) -> int:
         stmt = (
             update(Vacancy)
             .where(Vacancy.hh_id == hh_id)
@@ -217,7 +175,8 @@ class VacancyRepository(IVacancyRepository):
             .returning(Vacancy.used_count)
         )
         result = await self.session.execute(stmt)
-        await self.session.commit()
+        if commit:
+            await self.session.commit()
         return result.scalar_one()
 
     async def deactivate_old_vacancies(self, days: int) -> None:

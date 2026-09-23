@@ -1,43 +1,45 @@
 """
-tree.py - выводит дерево проекта и (опционально) содержимое всех файлов.
-Исключает: дебаг-файлы, *.txt, README, .env, логи, куки, coverage.
+tree.py — выводит дерево проекта и (опционально) содержимое всех файлов.
 
 Использование:
-    python tree.py [путь]             # только дерево
-    python tree.py [путь] --full-content   # дерево + содержимое всех файлов
+    python scripts/tree.py                        # только дерево
+    python scripts/tree.py --full-content         # дерево + содержимое всех файлов
+    python scripts/tree.py --content-only         # только содержимое
+    python scripts/tree.py --path .               # корень проекта
 
-Опции:
-    --full-content   Показать содержимое всех файлов после дерева (без ограничения размера)
+Исключаются: .venv, .git, __pycache__, cookies, logs, .env, *.db, *.pyc,
+бинарные файлы, .pytest_cache и прочий мусор. README и Dockerfile
+включаются.
 """
 
 import argparse
-import sys
 import fnmatch
+import sys
 from pathlib import Path
-from typing import List, Set, Tuple
+from typing import List, Set
 
-# Список игнорируемых элементов (расширенный для безопасности и чистоты)
-IGNORE_LIST = {
-    # Python cache & virtual environments
+
+# ============ Игнор-лист ============
+IGNORE_PATTERNS = {
+    # Python-кэш и окружения
     "__pycache__",
     ".git",
     ".venv",
     "venv",
     "env",
-    "ENV",
     ".pytest_cache",
     ".mypy_cache",
     ".ruff_cache",
     ".coverage",
     "htmlcov",
-    "*.egg-info/",
-    ".eggs/",
-    "build/",
-    "dist/",
-    "downloads/",
-    "wheels/",
+    "*.egg-info",
+    ".eggs",
+    "build",
+    "dist",
+    "downloads",
+    "wheels",
 
-    # IDE & Editor
+    # IDE
     ".vscode",
     ".idea",
     "*.swp",
@@ -45,73 +47,52 @@ IGNORE_LIST = {
     "*.sublime-project",
     "*.sublime-workspace",
 
-    # Environment & Secrets
+    # Секреты и куки (нельзя отправлять)
     ".env",
     ".env.local",
     ".env.prod",
-    ".env.example",
     ".env.*.local",
-    "*cookies*.txt",
+    "cookies",
     "*.pem",
     "*.key",
 
-    # Logs & Debug
+    # Логи и отладка
+    "logs",
     "*.log",
     "*.tmp",
     "*.dump",
     "debug_*.py",
     "debug_*.html",
     "*_debug.py",
-    "scripts/",
-    "cookies/"
-    "scripts/debug_*",
-    "scripts/*.dump",
-    "scripts/*.json",
 
-    # Documentation (по запросу)
-    "README.md",
-    "README.rst",
-    "README.txt",
-    "CHANGELOG.md",
-    "LICENSE",
-    "MANIFEST",
-
-    # Database & Binary
+    # Бинарники и БД
     "*.db",
     "*.sqlite",
     "*.sqlite3",
     "Thumbs.db",
-
-    # Build & Deploy
-    "alembic/versions",
-    "script.py.mako",
-    "uv.lock",
-    "poetry.lock",
-    "requirements.txt",  # опционально
-
-    # Project specific
-    "tree.py",  # сам скрипт
-    "ansible",
-    "terraform",
-    "redis/data",
-    "postgres/data",
-    "pg_data",
     "pgdata",
-    "old_app/",
-    "tmp/",
-    ".Python",
+    "pg_data",
+
+    # Сам скрипт и его окружение
+    "tree.py",
+    ".gitignore",
+
+    # Кэш Python
     "*.pyc",
-    "*.py[cod]",
-    "*$py.class",
+    "*.pyo",
+    "*.pyd",
     "*.so",
     "*.egg",
     "*.whl",
     "*.lock",
+    "uv.lock",
+    "poetry.lock",
+    "script.py.mako",
 }
 
-# Расширения бинарных файлов, которые не читаем как текст
+# Расширения, которые точно не читаем как текст
 BINARY_EXTS = {
-    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico",
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp",
     ".pdf", ".zip", ".tar", ".gz", ".7z", ".rar",
     ".exe", ".dll", ".so", ".dylib", ".bin",
     ".pyc", ".pyo", ".pyd", ".whl", ".egg",
@@ -123,97 +104,74 @@ BINARY_EXTS = {
 
 
 class IgnoreChecker:
-    """Класс для проверки игнорирования файлов с поддержкой .gitignore."""
+    """Проверка игнорирования с поддержкой .gitignore."""
 
-    def __init__(self, ignore_list: Set[str], gitignore_path: Path = None):
-        self.suffix_patterns = []
-        self.dir_patterns = []
-        self.exact_patterns = []
-        self.glob_patterns = []
+    def __init__(self, patterns: Set[str], gitignore_path: Path = None):
+        self.suffix_patterns: List[str] = []
+        self.dir_patterns: List[str] = []
+        self.exact_patterns: List[str] = []
+        self.glob_patterns: List[str] = []
 
-        self.compile_patterns(ignore_list)
+        self._compile(patterns)
 
-        # Загружаем паттерны из .gitignore если файл существует
         if gitignore_path and gitignore_path.exists():
-            self.load_gitignore(gitignore_path)
+            self._load_gitignore(gitignore_path)
 
-    def compile_patterns(self, ignore_list: Set[str]):
-        for pattern in ignore_list:
-            pattern = pattern.strip()
+    def _compile(self, patterns: Set[str]):
+        for raw in patterns:
+            pattern = raw.strip()
             if not pattern or pattern.startswith('#'):
                 continue
-
             if pattern.startswith("*."):
-                # Паттерн типа *.txt
                 self.suffix_patterns.append(pattern[1:])
             elif pattern.endswith("/"):
-                # Директория
                 self.dir_patterns.append(pattern.rstrip('/'))
             elif '*' in pattern or '?' in pattern:
-                # Glob-паттерн
                 self.glob_patterns.append(pattern)
             else:
-                # Точное совпадение
                 self.exact_patterns.append(pattern)
 
-    def load_gitignore(self, gitignore_path: Path):
-        """Загружает паттерны из .gitignore файла."""
+    def _load_gitignore(self, gitignore_path: Path):
         try:
             with open(gitignore_path, 'r', encoding='utf-8') as f:
                 for line in f:
                     line = line.strip()
-                    if not line or line.startswith('#'):
-                        continue
-                    self.compile_patterns({line})
+                    if line and not line.startswith('#'):
+                        self._compile({line})
         except Exception as e:
-            print(f"# [Предупреждение: не удалось прочитать .gitignore: {e}]", file=sys.stderr)
+            print(f"# [.gitignore: {e}]", file=sys.stderr)
 
     def should_ignore(self, rel_path: Path) -> bool:
         rel_str = str(rel_path).replace("\\", "/")
         rel_name = rel_path.name
         rel_suffix = rel_path.suffix.lower()
 
-        # Проверка по суффиксам (*.txt, *.log и т.д.)
         for suffix in self.suffix_patterns:
             if rel_name.endswith(suffix):
                 return True
 
-        # Проверка по директориям
         for dir_pat in self.dir_patterns:
+            # Директория совпадает, если это она сама или путь через неё
             if rel_str == dir_pat or rel_str.startswith(dir_pat + "/"):
                 return True
             if rel_name == dir_pat:
                 return True
 
-        # Проверка по точным совпадениям
         for exact in self.exact_patterns:
             if rel_str == exact or rel_name == exact:
                 return True
 
-        # Проверка по glob-паттернам
         for glob_pat in self.glob_patterns:
             if fnmatch.fnmatch(rel_name, glob_pat):
                 return True
             if fnmatch.fnmatch(rel_str, glob_pat):
                 return True
 
-        # Дополнительная проверка для debug-файлов
-        if 'debug' in rel_name.lower():
-            return True
-
-        # Проверка для *.txt файлов (кроме исключений)
-        if rel_suffix == '.txt':
-            if rel_name not in ['requirements.txt', 'LICENSE.txt']:
-                return True
-
         return False
 
     def is_binary(self, path: Path) -> bool:
-        """Проверяет, является ли файл бинарным."""
         if path.suffix.lower() in BINARY_EXTS:
             return True
-
-        # Дополнительная проверка по содержимому (первые 8192 байта)
         try:
             with open(path, 'rb') as f:
                 chunk = f.read(8192)
@@ -221,34 +179,23 @@ class IgnoreChecker:
                     return True
         except Exception:
             pass
-
         return False
 
 
-def walk_tree(
-        dir_path: Path,
-        ignore_checker: IgnoreChecker,
-        root: Path,
-        prefix: str = "",
-) -> List[str]:
-    """Рекурсивно обходит дерево и возвращает список строк с его структурой."""
-    lines = []
+def walk_tree(dir_path: Path, ignore_checker: IgnoreChecker,
+              root: Path, prefix: str = "") -> List[str]:
+    lines: List[str] = []
     try:
         entries = []
         for p in dir_path.iterdir():
             try:
-                rel_path = p.relative_to(root)
+                rel = p.relative_to(root)
             except ValueError:
-                rel_path = Path(p.name)
-
-            if not ignore_checker.should_ignore(rel_path):
+                rel = Path(p.name)
+            if not ignore_checker.should_ignore(rel):
                 entries.append(p)
-
         entries.sort(key=lambda p: (p.is_file(), p.name.lower()))
-    except PermissionError:
-        lines.append(prefix + "└── [не доступно]")
-        return lines
-    except OSError as e:
+    except (PermissionError, OSError) as e:
         lines.append(prefix + f"└── [ошибка: {e}]")
         return lines
 
@@ -259,45 +206,42 @@ def walk_tree(
     for pointer, path in zip(pointers, entries):
         lines.append(prefix + pointer + path.name)
         if path.is_dir():
-            extension = "│   " if pointer == "├── " else "    "
-            lines.extend(walk_tree(path, ignore_checker, root, prefix + extension))
-
+            ext = "│   " if pointer == "├── " else "    "
+            lines.extend(walk_tree(path, ignore_checker, root, prefix + ext))
     return lines
 
 
-def dump_all_contents(
-        dir_path: Path,
-        ignore_checker: IgnoreChecker,
-        root: Path,
-):
-    """Выводит содержимое всех файлов (без дерева) в stdout."""
+def dump_contents(dir_path: Path, ignore_checker: IgnoreChecker,
+                  root: Path, root_prefix: str):
+    """Печатает содержимое всех файлов, с указанием полного пути от корня проекта."""
     try:
         entries = []
         for p in dir_path.iterdir():
             try:
-                rel_path = p.relative_to(root)
+                rel = p.relative_to(root)
             except ValueError:
-                rel_path = Path(p.name)
-
-            if not ignore_checker.should_ignore(rel_path):
+                rel = Path(p.name)
+            if not ignore_checker.should_ignore(rel):
                 entries.append(p)
-
         entries.sort(key=lambda p: (p.is_file(), p.name.lower()))
-    except PermissionError:
-        return
-    except OSError:
+    except (PermissionError, OSError):
         return
 
     for path in entries:
         if path.is_dir():
-            dump_all_contents(path, ignore_checker, root)
+            dump_contents(path, ignore_checker, root, root_prefix)
         elif path.is_file():
-            # Пропускаем бинарные файлы
             if ignore_checker.is_binary(path):
                 continue
 
-            rel_path = path.relative_to(root)
-            print(f"\n# Файл: {rel_path}")
+            rel = path.relative_to(root)
+            # Полный путь: hhparser/app/db/models.py
+            display = f"{root_prefix}/{rel}".replace("\\", "/")
+
+            print(f"\n\n{'=' * 78}")
+            print(f"# Файл: {display}")
+            print(f"{'=' * 78}")
+
             try:
                 with path.open(encoding="utf-8", errors="replace") as f:
                     for line in f:
@@ -308,64 +252,49 @@ def dump_all_contents(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Выводит дерево проекта и (опционально) содержимое всех файлов",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
+        description="Дерево проекта и (опционально) содержимое всех файлов.",
     )
     parser.add_argument(
-        "path",
-        nargs="?",
-        default=".",
+        "--path", default=".",
         help="Корневая директория (по умолчанию: текущая)",
     )
     parser.add_argument(
-        "--full-content",
-        action="store_true",
-        help="Показать содержимое всех файлов после дерева (без ограничений)",
+        "--full-content", action="store_true",
+        help="Показать дерево + содержимое всех файлов",
     )
     parser.add_argument(
-        "--no-gitignore",
-        action="store_true",
+        "--content-only", action="store_true",
+        help="Показать только содержимое (без дерева)",
+    )
+    parser.add_argument(
+        "--no-gitignore", action="store_true",
         help="Не загружать паттерны из .gitignore",
     )
 
     args = parser.parse_args()
-    root_path = Path(args.path).resolve()
+    root = Path(args.path).resolve()
 
-    if not root_path.exists():
-        print(f"Ошибка: путь '{root_path}' не существует.", file=sys.stderr)
+    if not root.exists() or not root.is_dir():
+        print(f"Ошибка: {root} не существует или не директория.", file=sys.stderr)
         sys.exit(1)
 
-    if not root_path.is_dir():
-        print(f"Ошибка: путь '{root_path}' не является директорией.", file=sys.stderr)
-        sys.exit(1)
+    gitignore = None if args.no_gitignore else (root / ".gitignore")
+    checker = IgnoreChecker(IGNORE_PATTERNS, gitignore)
 
-    # Загружаем .gitignore если он существует
-    gitignore_path = root_path / ".gitignore" if not args.no_gitignore else None
-
-    ignore_checker = IgnoreChecker(IGNORE_LIST, gitignore_path)
-
-    try:
-        # Выводим структуру проекта
+    # Структура — всегда в начале, если не content-only
+    if not args.content_only:
         print("СТРУКТУРА ПРОЕКТА:")
-        print(root_path.name + "/")
-        tree_lines = walk_tree(root_path, ignore_checker, root_path)
-        for line in tree_lines:
+        print(f"{root.name}/")
+        for line in walk_tree(root, checker, root):
             print(line)
 
-        # Если запрошено полное содержимое
-        if args.full_content:
-            print("\n" + "=" * 60)
-            print("СОДЕРЖИМОЕ ФАЙЛОВ:")
-            print("=" * 60)
-            dump_all_contents(root_path, ignore_checker, root_path)
-
-    except OSError as e:
-        print(f"Ошибка ввода/вывода: {e}", file=sys.stderr)
-        sys.exit(1)
-    except KeyboardInterrupt:
-        print("\n[Прервано пользователем]", file=sys.stderr)
-        sys.exit(1)
+    # Содержимое
+    if args.full_content or args.content_only:
+        if not args.content_only:
+            print(f"\n{'#' * 78}")
+            print(f"# СОДЕРЖИМОЕ ФАЙЛОВ")
+            print(f"{'#' * 78}")
+        dump_contents(root, checker, root, root.name)
 
 
 if __name__ == "__main__":

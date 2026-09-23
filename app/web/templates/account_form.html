@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>{% if is_new %}Добавить аккаунт{% else %}Редактировать аккаунт {{ account.id }}{% endif %}</title>
+    <style>
+        body { font-family: sans-serif; background: #f0f2f5; padding: 20px; }
+        .card { background: white; border-radius: 8px; padding: 20px; max-width: 800px; margin: 0 auto; }
+        fieldset { border: 1px solid #ddd; border-radius: 6px; margin: 12px 0; padding: 12px; }
+        legend { font-weight: bold; padding: 0 8px; }
+        label { display: block; margin: 8px 0 4px; font-size: 0.9em; color: #444; }
+        input[type="text"], input[type="number"], input[type="password"] {
+            width: 100%; padding: 8px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px;
+        }
+        .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+        .hint { font-size: 0.85em; color: #888; margin-top: 4px; }
+        button { padding: 10px 20px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        .danger { background: #dc3545; }
+        .message { margin: 10px 0; padding: 10px; border-radius: 4px; }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+        .warn { background: #fff3cd; color: #856404; }
+        .check { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
+    </style>
+</head>
+<body>
+<div class="card">
+    <h2>{% if is_new %}➕ Новый аккаунт{% else %}✏️ Аккаунт {{ account.id }}{% endif %}</h2>
+
+    <form id="account-form">
+        <fieldset>
+            <legend>Основное</legend>
+            <div class="row">
+                <div>
+                    <label>Telegram ID</label>
+                    <input type="number" name="id" value="{{ account.id if account else '' }}" {% if not is_new
+                           %}readonly{% endif %} required>
+                    <div class="hint">Ваш tg user id (число). Менять после создания нельзя.</div>
+                </div>
+                <div>
+                    <label>Telegram username</label>
+                    <input type="text" name="tg_username" value="{{ account.tg_username if account else '' }}" required>
+                    <div class="hint">Имя файла cookies: <code>cookies/{tg_username}.txt</code></div>
+                </div>
+            </div>
+            <label>Resume ID (hh.ru)</label>
+            <input type="text" name="resume_id" value="{{ account.resume_id if account else '' }}" required>
+            <div class="check">
+                <input type="checkbox" name="is_enabled" {% if not account or account.is_enabled %}checked{% endif %}>
+                <label style="margin: 0;">Аккаунт включён</label>
+            </div>
+        </fieldset>
+
+        <fieldset>
+            <legend>🌐 Прокси</legend>
+            <div class="hint">
+                Оставьте пустым — использовать глобальный из <code>.env</code>.
+                Введите <code>-</code>, чтобы работать БЕЗ прокси.
+            </div>
+            <label>Server (host:port)</label>
+            <input type="text" name="proxy_server"
+                   value="{{ account.proxy_server if account and account.proxy_server else '' }}">
+            <div class="row">
+                <div>
+                    <label>Username</label>
+                    <input type="text" name="proxy_username"
+                           value="{{ account.proxy_username if account and account.proxy_username else '' }}">
+                </div>
+                <div>
+                    <label>Password</label>
+                    <input type="password" name="proxy_password"
+                           placeholder="{% if account and account.proxy_password %}•••••••{% endif %}">
+                </div>
+            </div>
+        </fieldset>
+
+        <fieldset>
+            <legend>⏰ Рабочее расписание</legend>
+            <div class="hint">Пусто = взять из глобального <code>.env</code></div>
+            <div class="row-3">
+                <div>
+                    <label>Start hour</label>
+                    <input type="number" name="work_start_hour" min="0" max="23"
+                           value="{{ account.work_start_hour if account and account.work_start_hour is not none else '' }}">
+                </div>
+                <div>
+                    <label>Start minute</label>
+                    <input type="number" name="work_start_minute" min="0" max="59"
+                           value="{{ account.work_start_minute if account and account.work_start_minute is not none else '' }}">
+                </div>
+            </div>
+            <div class="row-3">
+                <div>
+                    <label>End hour</label>
+                    <input type="number" name="work_end_hour" min="0" max="23"
+                           value="{{ account.work_end_hour if account and account.work_end_hour is not none else '' }}">
+                </div>
+                <div>
+                    <label>End minute</label>
+                    <input type="number" name="work_end_minute" min="0" max="59"
+                           value="{{ account.work_end_minute if account and account.work_end_minute is not none else '' }}">
+                </div>
+            </div>
+        </fieldset>
+
+        <fieldset>
+            <legend>☕ Паузы</legend>
+            <div class="row-3">
+                <div>
+                    <label>Count</label>
+                    <input type="number" name="pause_count" min="0" max="10"
+                           value="{{ account.pause_count if account and account.pause_count is not none else '' }}">
+                </div>
+                <div>
+                    <label>Min minutes</label>
+                    <input type="number" name="pause_min_minutes" min="1"
+                           value="{{ account.pause_min_minutes if account and account.pause_min_minutes is not none else '' }}">
+                </div>
+                <div>
+                    <label>Max minutes</label>
+                    <input type="number" name="pause_max_minutes" min="1"
+                           value="{{ account.pause_max_minutes if account and account.pause_max_minutes is not none else '' }}">
+                </div>
+            </div>
+            <label>Min gap between pauses (min)</label>
+            <input type="number" name="min_gap_minutes" min="1"
+                   value="{{ account.min_gap_minutes if account and account.min_gap_minutes is not none else '' }}">
+        </fieldset>
+
+        <fieldset>
+            <legend>📊 Дневной лимит откликов</legend>
+            <div class="row">
+                <div>
+                    <label>Min</label>
+                    <input type="number" name="daily_limit_min" min="1"
+                           value="{{ account.daily_limit_min if account and account.daily_limit_min is not none else '' }}">
+                </div>
+                <div>
+                    <label>Max</label>
+                    <input type="number" name="daily_limit_max" min="1"
+                           value="{{ account.daily_limit_max if account and account.daily_limit_max is not none else '' }}">
+                </div>
+            </div>
+        </fieldset>
+
+        <div style="margin-top: 20px; display: flex; gap: 10px;">
+            <button type="submit">💾 Сохранить</button>
+            <a href="/"
+               style="padding: 10px 20px; text-decoration: none; border: 1px solid #ccc; border-radius: 4px; color: #333;">←
+                Назад</a>
+            {% if not is_new %}
+            <button type="button" class="danger" onclick="deleteAccount()">🗑 Удалить</button>
+            {% endif %}
+        </div>
+    </form>
+
+    <div id="message"></div>
+
+    {% if not is_new %}
+    <div class="message warn" style="margin-top: 20px;">
+        ⚠️ Файл cookies: <code>cookies/{{ account.tg_username }}.txt</code> —
+        {% if cookies_exists %}✅ загружен{% else %}❌ НЕ найден{% endif %}.
+        Загрузить можно вручную: экспортируйте cookies из браузера в Netscape-формате.
+    </div>
+    {% endif %}
+</div>
+
+<script>
+    const isNew = {{ 'true' if is_new else 'false' }};
+    const accountId = {{ account.id if account else 'null' }};
+
+    function collectData() {
+        const form = document.getElementById('account-form');
+        const fd = new FormData(form);
+        const data = {};
+        for (const [key, value] of fd.entries()) {
+            if (value === '') {
+                data[key] = null;
+                continue;
+            }
+            if (key === 'is_enabled') {
+                data[key] = true;
+                continue;
+            }
+            if (['id', 'work_start_hour', 'work_start_minute', 'work_end_hour', 'work_end_minute',
+                 'pause_count', 'pause_min_minutes', 'pause_max_minutes', 'min_gap_minutes',
+                 'daily_limit_min', 'daily_limit_max'].includes(key)) {
+                data[key] = parseInt(value);
+            } else {
+                data[key] = value;
+            }
+        }
+        // checkbox, если не отмечен — в FormData его нет
+        data.is_enabled = form.is_enabled.checked;
+        // спец-обработка "-" → явно без прокси
+        if (data.proxy_server === '-') data.proxy_server = '';
+        // Пароль не трогаем, если поле пустое и это редактирование
+        if (!isNew && !data.proxy_password) {
+            delete data.proxy_password;
+        }
+        return data;
+    }
+
+    document.getElementById('account-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const data = collectData();
+        const url = isNew ? '/api/accounts' : `/api/accounts/${accountId}`;
+        const method = isNew ? 'POST' : 'PATCH';
+        const resp = await fetch(url, {
+            method,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data),
+        });
+        const result = await resp.json();
+        const msg = document.getElementById('message');
+        if (resp.ok) {
+            msg.innerHTML = '<div class="message success">✅ Сохранено</div>';
+            if (isNew) setTimeout(() => window.location.href = '/', 800);
+        } else {
+            msg.innerHTML = `<div class="message error">❌ ${result.detail || 'Ошибка'}</div>`;
+        }
+    });
+
+    function deleteAccount() {
+        if (!confirm('Удалить аккаунт? Записи откликов останутся в БД.')) return;
+        fetch(`/api/accounts/${accountId}`, { method: 'DELETE' })
+            .then(r => { if (r.ok) window.location.href = '/'; else alert('Ошибка удаления'); });
+    }
+</script>
+</body>
+</html>
