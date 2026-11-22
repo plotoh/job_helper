@@ -448,7 +448,6 @@ docker exec -it hhparser_db psql -U user -d hhparser -c "SELECT used_count, COUN
 ORDER BY used_count;"
 
 # Обнуление счётчика страниц поиска
-
 # Посмотреть текущее значение
 
 docker exec -it hhparser_db psql -U user -d hhparser -c "SELECT id, search_url, last_page FROM parsing_progress;"

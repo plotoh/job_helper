@@ -20,6 +20,8 @@ from app.db import (
 )
 from app.db.repositories.account_repo import AccountRepository
 from app.db.repositories.account_state_repo import AccountStateRepository
+from app.db.repositories.search_filter_repo import SearchFilterRepository
+from app.db.models import SearchFilter
 from app.utils.settings_utils import get_setting, set_setting
 from app.utils.time_utils import msk_now
 from app.utils.proxy_utils import normalize_proxy_server
@@ -58,6 +60,17 @@ class AccountCreate(BaseModel):
 
 class AccountUpdate(AccountCreate):
     id: int
+
+
+class SearchFilterCreate(BaseModel):
+    name: str
+    url: str
+    is_active: bool = False
+
+
+class SearchFilterUpdate(BaseModel):
+    name: Optional[str] = None
+    url: Optional[str] = None
 
 
 # ---------- Pages ----------
@@ -193,6 +206,7 @@ async def list_accounts():
             }
             for a in accounts
         ]
+
 
 @app.post("/api/accounts")
 async def create_account(data: AccountCreate):
@@ -517,6 +531,62 @@ async def get_include_junior_status():
 async def get_include_senior_status():
     val = await get_setting('include_senior', 'true')
     return {"enabled": val == 'true'}
+
+
+# ---------- API: фильтры парсинга ----------
+@app.get("/api/search-filters")
+async def list_search_filters():
+    async with AsyncSessionLocal() as session:
+        repo = SearchFilterRepository(session)
+        items = await repo.list_all()
+        return [
+            {
+                "id": f.id,
+                "name": f.name,
+                "url": f.url,
+                "is_active": f.is_active,
+                "created_at": f.created_at.isoformat() if f.created_at else None,
+            }
+            for f in items
+        ]
+
+
+@app.post("/api/search-filters")
+async def create_search_filter(data: SearchFilterCreate):
+    async with AsyncSessionLocal() as session:
+        repo = SearchFilterRepository(session)
+        obj = await repo.create(data.name, data.url, data.is_active)
+        return {"status": "ok", "id": obj.id}
+
+
+@app.patch("/api/search-filters/{filter_id}")
+async def update_search_filter(filter_id: int, data: SearchFilterUpdate):
+    async with AsyncSessionLocal() as session:
+        repo = SearchFilterRepository(session)
+        obj = await repo.update(filter_id, data.name, data.url)
+        if not obj:
+            raise HTTPException(404, "Filter not found")
+        return {"status": "ok"}
+
+
+@app.post("/api/search-filters/{filter_id}/activate")
+async def activate_search_filter(filter_id: int):
+    async with AsyncSessionLocal() as session:
+        repo = SearchFilterRepository(session)
+        obj = await repo.activate(filter_id)
+        if not obj:
+            raise HTTPException(404, "Filter not found")
+        return {"status": "ok", "id": obj.id}
+
+
+@app.delete("/api/search-filters/{filter_id}")
+async def delete_search_filter(filter_id: int):
+    async with AsyncSessionLocal() as session:
+        repo = SearchFilterRepository(session)
+        ok = await repo.delete(filter_id)
+        if not ok:
+            raise HTTPException(404, "Filter not found")
+        return {"status": "ok"}
 
 
 if __name__ == "__main__":

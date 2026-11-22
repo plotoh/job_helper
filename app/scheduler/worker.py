@@ -18,6 +18,7 @@ from app.utils.settings_utils import get_setting, set_setting, effective_setting
 from app.utils.time_utils import msk_now, MSK_TZ, msk_today
 from app.utils.proxy_utils import build_proxy_dict
 
+
 def setup_logging():
     log_level = getattr(logging, settings.LOG_LEVEL, logging.INFO)
     log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -77,6 +78,46 @@ class Worker:
                 await set_setting('force_parsing', 'false')
                 logger.info("✅ Принудительный парсинг завершён, флаг сброшен")
 
+    def _check_cookies_unique(self, accounts) -> None:
+        """
+        Sanity check: не загружены ли одинаковые cookies под разные аккаунты.
+        Читает hhul из каждого файла cookies и логирует коллизии.
+        """
+        logger = logging.getLogger(__name__)
+        hhul_map = {}  # hhul → "account_id (tg_username)"
+
+        for acc in accounts:
+            cookies_file = Path(settings.COOKIES_DIR) / f"{acc.tg_username}.txt"
+            if not cookies_file.exists():
+                continue
+            try:
+                with open(cookies_file, encoding="utf-8") as f:
+                    for line in f:
+                        parts = line.strip().split("\t")
+                        if len(parts) >= 7 and parts[5] == "hhul":
+                            hhul = parts[6].strip()
+                            if not hhul:
+                                continue
+                            label = f"{acc.id} ({acc.tg_username})"
+                            if hhul in hhul_map:
+                                logger.error(
+                                    f"❌ КРИТИЧНО: cookies {label} и {hhul_map[hhul]} "
+                                    f"имеют одинаковый hhul={hhul[:8]}..."
+                                )
+                            else:
+                                hhul_map[hhul] = label
+                            break
+            except Exception as e:
+                logger.warning(f"Не удалось прочитать cookies {cookies_file}: {e}")
+
+        if hhul_map and len(hhul_map) < len(accounts):
+            logger.warning(
+                f"⚠️ Найдено {len(hhul_map)} уникальных hhul для {len(accounts)} аккаунтов. "
+                "Проверьте файлы cookies!"
+            )
+        else:
+            logger.info(f"✅ Cookies проверены: {len(hhul_map)} уникальных hhul")
+
     async def start(self):
         logger = logging.getLogger(__name__)
         logger.info("Starting worker")
@@ -109,6 +150,10 @@ class Worker:
 
         if settings.RESPONSES_ENABLED:
             logger.info(f"Responses ENABLED. Found {len(accounts)} enabled accounts.")
+
+            # Sanity check — не одинаковые ли cookies
+            self._check_cookies_unique(accounts)
+
             for acc in accounts:
                 cookies_file = Path(settings.COOKIES_DIR) / f"{acc.tg_username}.txt"
                 if not cookies_file.exists():
@@ -133,6 +178,7 @@ class Worker:
                     account=acc,
                     browser_context=context,
                     template=self.template,
+                    browser_manager=self.browser_manager,
                 )
                 self.account_workers.append(worker)
                 self.worker_tasks.append(asyncio.create_task(worker.run()))

@@ -17,6 +17,7 @@ from app.db import (
     VacancyRepository,
     FilteredOutVacancy,
 )
+from app.db.repositories.search_filter_repo import SearchFilterRepository
 from app.hh_client.detail_parser import HHVacancyDetailParser
 from app.hh_client.list_parser import HHVacancyListParser
 from app.hh_client.vacancy_filter import VacancyFilter
@@ -43,6 +44,17 @@ class ParsingScheduler:
         self.stop_event = asyncio.Event()
         self.scorer = VacancyScorer()
 
+    async def _get_active_search_url(self) -> str:
+        """URL активного фильтра, иначе из .env."""
+        try:
+            async with AsyncSessionLocal() as session:
+                active = await SearchFilterRepository(session).get_active()
+                if active:
+                    return active.url
+        except Exception as e:
+            logger.warning(f"Не удалось получить активный фильтр: {e}")
+        return settings.HH_SEARCH_URL
+
     async def _interruptible_sleep(self, seconds: float):
         """Спит с проверкой stop_event каждые 10 секунд."""
         end_time = asyncio.get_event_loop().time() + seconds
@@ -59,15 +71,17 @@ class ParsingScheduler:
         logger.info(f"🚀 Принудительный парсинг {pages} страниц")
         total_saved = 0
         try:
+            search_url = await self._get_active_search_url()
+            logger.info(f"Force parse will use URL: {search_url}")
             async with AsyncSessionLocal() as session:
                 progress_repo = ParsingProgressRepository(session)
-                progress = await progress_repo.get_or_create(settings.HH_SEARCH_URL)
+                progress = await progress_repo.get_or_create(search_url)
                 start_page = progress.last_page + 1  # начинаем со следующей страницы за последней сохранённой
 
             for i in range(pages):
                 page = start_page + i
                 logger.info(f"Принудительный парсинг страницы {page}")
-                vacancies_list = await self.list_parser.fetch_ids(settings.HH_SEARCH_URL, page, self.context)
+                vacancies_list = await self.list_parser.fetch_ids(search_url, page, self.context)
                 if not vacancies_list:
                     logger.info(f"Нет вакансий на странице {page}, остановка")
                     break
@@ -115,7 +129,7 @@ class ParsingScheduler:
                     await session.commit()
                     # Обновляем прогресс (чтобы в следующий раз начать со следующей страницы)
                     progress_repo = ParsingProgressRepository(session)
-                    await progress_repo.update_last_page(settings.HH_SEARCH_URL, page)
+                    await progress_repo.update_last_page(search_url, page)
                     total_saved += saved_this_page
                 logger.info(f"Принудительно: страница {page} сохранено {saved_this_page} вакансий")
 
@@ -217,9 +231,12 @@ class ParsingScheduler:
         total_saved = 0
         pages_processed = 0
         try:
+            search_url = await self._get_active_search_url()
+            logger.info(f"Parsing will use URL: {search_url}")
+
             async with AsyncSessionLocal() as session:
                 progress_repo = ParsingProgressRepository(session)
-                progress = await progress_repo.get_or_create(settings.HH_SEARCH_URL)
+                progress = await progress_repo.get_or_create(search_url)
 
             pages_to_do = settings.PAGES_PER_WINDOW
 
@@ -232,8 +249,10 @@ class ParsingScheduler:
                 logger.info(f"Parsing page {next_page} for window {window_idx}")
 
                 vacancies_list = await self.list_parser.fetch_ids(
-                    settings.HH_SEARCH_URL, next_page, self.context
+                    search_url, next_page, self.context,
+                    order_by_publication=True,
                 )
+
                 if not vacancies_list:
                     logger.info(f"No vacancies found on page {next_page}, stopping further pages.")
                     break
@@ -321,7 +340,7 @@ class ParsingScheduler:
 
                 async with AsyncSessionLocal() as session:
                     progress_repo = ParsingProgressRepository(session)
-                    await progress_repo.update_last_page(settings.HH_SEARCH_URL, next_page)
+                    await progress_repo.update_last_page(search_url, next_page)
                     pages_processed += 1
 
             # Обновляем лог

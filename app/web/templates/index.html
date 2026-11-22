@@ -84,6 +84,7 @@
     <div class="button-group">
         <button id="toggle-responses-btn" class="btn-warning" onclick="toggleResponses()">⏸ Отключить отклики</button>
         <button class="btn-success" onclick="startParsing()">▶ Запустить парсинг сейчас</button>
+        <button class="btn-primary" onclick="openFiltersModal()">⚙️ Выбор готового фильтра</button>
     </div>
     <p style="margin-top:10px; font-size:0.9em; color:#666;">
         Отключение откликов остановит все новые попытки в течение ~30 секунд. Включение возобновит работу.
@@ -320,12 +321,192 @@
             })
             .catch(err => alert('Ошибка запроса: ' + err));
     }
+    // ============ Фильтры парсинга ============
 
+    let _filtersCache = [];
+
+    async function openFiltersModal() {
+        document.getElementById('filters-modal').style.display = 'flex';
+        await loadFilters();
+    }
+
+    function closeFiltersModal() {
+        document.getElementById('filters-modal').style.display = 'none';
+        document.getElementById('filters-message').innerHTML = '';
+    }
+
+    async function loadFilters() {
+        try {
+            const resp = await fetch('/api/search-filters');
+            const items = await resp.json();
+            _filtersCache = items;
+            renderFilters(items);
+        } catch (e) {
+            console.error('Ошибка загрузки фильтров:', e);
+        }
+    }
+
+    function renderFilters(items) {
+        const tbody = document.getElementById('filters-body');
+        if (!items.length) {
+            tbody.innerHTML = '<tr><td colspan="4" style="padding:12px; text-align:center; color:#888;">Нет фильтров. Нажмите «Добавить».</td></tr>';
+            return;
+        }
+        tbody.innerHTML = items.map(f => `
+            <tr data-id="${f.id}" style="border-bottom:1px solid #eee;">
+                <td style="padding:8px; text-align:center;">
+                    <input type="radio" name="active-filter" value="${f.id}"
+                           ${f.is_active ? 'checked' : ''}
+                           onchange="activateFilter(${f.id})">
+                </td>
+                <td style="padding:8px;">
+                    <input type="text" class="filter-name" value="${escapeHtml(f.name)}"
+                           data-orig="${escapeHtml(f.name)}"
+                           style="width:100%; padding:4px 6px; border:1px solid #ccc; border-radius:4px;">
+                </td>
+                <td style="padding:8px;">
+                    <input type="text" class="filter-url" value="${escapeHtml(f.url)}"
+                           data-orig="${escapeHtml(f.url)}"
+                           style="width:100%; padding:4px 6px; border:1px solid #ccc; border-radius:4px; font-family:monospace; font-size:0.85em;">
+                </td>
+                <td style="padding:8px; white-space:nowrap;">
+                    <button class="btn-danger" onclick="deleteFilter(${f.id})" style="padding:4px 8px; font-size:0.85em;">🗑</button>
+                </td>
+            </tr>
+        `).join('');
+    }
+
+    function escapeHtml(s) {
+        if (s === null || s === undefined) return '';
+        return String(s).replace(/[&<>"']/g, c => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        }[c]));
+    }
+
+    function addFilterRow() {
+        const tbody = document.getElementById('filters-body');
+        // Убираем "нет фильтров" placeholder если есть
+        const placeholder = tbody.querySelector('td[colspan="4"]');
+        if (placeholder) tbody.innerHTML = '';
+
+        const tr = document.createElement('tr');
+        tr.dataset.id = 'new';
+        tr.style.borderBottom = '1px solid #eee';
+        tr.innerHTML = `
+            <td style="padding:8px; text-align:center;"><input type="radio" name="active-filter" disabled></td>
+            <td style="padding:8px;"><input type="text" class="filter-name" placeholder="FastAPI" style="width:100%; padding:4px 6px; border:1px solid #ccc; border-radius:4px;"></td>
+            <td style="padding:8px;"><input type="text" class="filter-url" placeholder="https://hh.ru/search/vacancy?text=..." style="width:100%; padding:4px 6px; border:1px solid #ccc; border-radius:4px; font-family:monospace; font-size:0.85em;"></td>
+            <td style="padding:8px;"><button class="btn-danger" onclick="this.closest('tr').remove()" style="padding:4px 8px; font-size:0.85em;">✕</button></td>
+        `;
+        tbody.appendChild(tr);
+    }
+
+    async function saveAllFilters() {
+        const tbody = document.getElementById('filters-body');
+        const rows = tbody.querySelectorAll('tr[data-id]');
+        const msg = document.getElementById('filters-message');
+        msg.innerHTML = '';
+        const errors = [];
+
+        for (const tr of rows) {
+            const id = tr.dataset.id;
+            const name = tr.querySelector('.filter-name').value.trim();
+            const url = tr.querySelector('.filter-url').value.trim();
+            if (!name || !url) continue;
+
+            try {
+                if (id === 'new') {
+                    await fetch('/api/search-filters', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({name, url, is_active: false}),
+                    });
+                } else {
+                    const origName = tr.querySelector('.filter-name').dataset.orig;
+                    const origUrl = tr.querySelector('.filter-url').dataset.orig;
+                    if (name !== origName || url !== origUrl) {
+                        await fetch(`/api/search-filters/${id}`, {
+                            method: 'PATCH',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({name, url}),
+                        });
+                    }
+                }
+            } catch (e) {
+                errors.push(`${name}: ${e.message}`);
+            }
+        }
+
+        if (errors.length) {
+            msg.innerHTML = `<div class="message error">❌ Ошибки: ${errors.join('; ')}</div>`;
+        } else {
+            msg.innerHTML = '<div class="message success">✅ Сохранено</div>';
+            await loadFilters();
+        }
+    }
+
+    async function deleteFilter(id) {
+        if (!confirm('Удалить фильтр?')) return;
+        try {
+            const resp = await fetch(`/api/search-filters/${id}`, {method: 'DELETE'});
+            if (resp.ok) await loadFilters();
+        } catch (e) { alert('Ошибка: ' + e.message); }
+    }
+
+    async function activateFilter(id) {
+        try {
+            const resp = await fetch(`/api/search-filters/${id}/activate`, {method: 'POST'});
+            if (resp.ok) {
+                document.getElementById('filters-message').innerHTML =
+                    '<div class="message success">✅ Активный фильтр обновлён</div>';
+                await loadFilters();
+            }
+        } catch (e) { alert('Ошибка: ' + e.message); }
+    }
     // --- Инициализация ---
     refreshData();
     setInterval(refreshData, 15000);
     updateResponsesUI();
     loadLevelSettings();
 </script>
+<!-- Модалка выбора фильтра парсинга -->
+<div id="filters-modal"
+     style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:1000; align-items:center; justify-content:center;">
+    <div style="background:#fff; border-radius:8px; padding:20px; max-width:1100px; width:95%; max-height:85vh; overflow:auto;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+            <h2 style="margin:0;">⚙️ Фильтры парсинга</h2>
+            <button onclick="closeFiltersModal()" style="background:none; border:none; font-size:24px; cursor:pointer;">
+                ✕
+            </button>
+        </div>
+
+        <p style="color:#666; font-size:0.9em; margin:0 0 12px;">
+            Отметьте активный фильтр (radio). Парсер будет ходить по этому URL.
+            Если ни один не выбран — используется <code>HH_SEARCH_URL</code> из <code>.env</code>.
+        </p>
+
+        <table id="filters-table" style="width:100%; border-collapse:collapse;">
+            <thead>
+            <tr style="background:#f8f9fa;">
+                <th style="width:60px; padding:8px;">Активен</th>
+                <th style="width:220px; padding:8px;">Название</th>
+                <th style="padding:8px;">URL</th>
+                <th style="width:160px; padding:8px;"></th>
+            </tr>
+            </thead>
+            <tbody id="filters-body">
+            <!-- заполняется JS -->
+            </tbody>
+        </table>
+
+        <div style="margin-top:16px; display:flex; gap:10px;">
+            <button class="btn-primary" onclick="addFilterRow()">➕ Добавить</button>
+            <button class="btn-success" onclick="saveAllFilters()">💾 Сохранить все</button>
+            <button class="btn-warning" onclick="closeFiltersModal()">Закрыть</button>
+        </div>
+
+        <div id="filters-message" style="margin-top:12px;"></div>
+    </div>
+</div>
 </body>
 </html>

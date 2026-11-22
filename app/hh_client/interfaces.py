@@ -5,7 +5,7 @@ from playwright.async_api import BrowserContext
 
 class IVacancyListParser(ABC):
     @abstractmethod
-    async def fetch_ids(self, url: str, max_pages: int, context: BrowserContext) -> List[Dict[str, str]]:
+    async def fetch_ids(self, url: str, page: int, context, order_by_publication: bool = False) -> List[Dict[str, str]]:
         pass
 
 

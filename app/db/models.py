@@ -5,6 +5,7 @@ from sqlalchemy import Column, String, Integer, Boolean, DateTime, ForeignKey, J
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.sql import func
 import json
+from datetime import datetime
 
 Base = declarative_base()
 
@@ -33,7 +34,7 @@ class Vacancy(Base):
 class Account(Base):
     __tablename__ = 'accounts'
 
-    id = Column(BigInteger, primary_key=True)               # tg_id
+    id = Column(BigInteger, primary_key=True)  # tg_id
     tg_username = Column(String, unique=True, nullable=True)
     resume_id = Column(String, nullable=False)
     created_at = Column(DateTime, server_default=func.now())
@@ -47,7 +48,7 @@ class Account(Base):
     proxy_password = Column(String, nullable=True)
 
     # --- Рабочее расписание ---
-    work_start_hour = Column(Integer, nullable=True)         # NULL = брать из settings
+    work_start_hour = Column(Integer, nullable=True)  # NULL = брать из settings
     work_start_minute = Column(Integer, nullable=True)
     work_end_hour = Column(Integer, nullable=True)
     work_end_minute = Column(Integer, nullable=True)
@@ -141,29 +142,18 @@ class FilteredOutVacancy(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 
-# class JuniorVacancy(Base):
-#     __tablename__ = 'junior_vacancies'
-#
-#     hh_id = Column(String, primary_key=True)
-#     title = Column(String, nullable=False)
-#     url = Column(String, nullable=False)
-#     created_at = Column(DateTime, server_default=func.now())
-#     score = Column(Integer, default=0)  # <-- добавить
-#     is_actual = Column(Boolean, default=True)  # <-- добавить
-#     used_count = Column(Integer, default=0)  # <-- добавить
-#
-#
-# class SeniorVacancy(Base):
-#     __tablename__ = 'senior_vacancies'
-#
-#     hh_id = Column(String, primary_key=True)
-#     title = Column(String, nullable=False)
-#     url = Column(String, nullable=False)
-#     created_at = Column(DateTime, server_default=func.now())
-#
-#     score = Column(Integer, default=0)  # <-- добавить
-#     is_actual = Column(Boolean, default=True)  # <-- добавить
-#     used_count = Column(Integer, default=0)  # <-- добавить
+class SearchFilter(Base):
+    """Сохранённые ссылки-фильтры для парсинга вакансий."""
+    __tablename__ = "search_filters"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False)
+    url = Column(Text, nullable=False)
+    is_active = Column(Boolean, nullable=False, default=False, index=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+
+    def __repr__(self):
+        return f"<SearchFilter(id={self.id}, name={self.name!r}, active={self.is_active})>"
 
 
 class Setting(Base):

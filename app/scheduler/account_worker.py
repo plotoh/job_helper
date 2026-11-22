@@ -7,8 +7,6 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.config import settings
 from app.db import AsyncSessionLocal
 from app.db.models import Account
@@ -19,6 +17,7 @@ from app.db.repositories.vacancy_repo import VacancyRepository
 from app.hh_client.hh_response import HHResponseService
 from app.hh_client.message_generator import generate_message
 from app.scheduler.daily_planner import generate_daily_limit, generate_pauses
+from app.utils.proxy_utils import build_proxy_dict
 from app.utils.settings_utils import (
     get_setting,
     get_include_junior,
@@ -55,11 +54,13 @@ def setup_account_logger(account_id: int) -> logging.Logger:
 
 
 class AccountWorker:
-    def __init__(self, account: Account, browser_context, template: str):
+    def __init__(self, account: Account, browser_context, template: str,
+                 browser_manager=None):
         self.account = account
         self.account_id = account.id
         self.resume_id = account.resume_id
         self.context = browser_context
+        self.browser_manager = browser_manager
         self.template = template
         self.response_service = HHResponseService()
         self.stop_event = asyncio.Event()
@@ -76,10 +77,6 @@ class AccountWorker:
         self.work_end = time(cfg["work_end_hour"], cfg["work_end_minute"])
 
     async def _reload_account(self) -> bool:
-        """
-        Перечитывает account и настройки из БД.
-        Возвращает False, если аккаунт отключён в UI (is_enabled=false).
-        """
         async with AsyncSessionLocal() as session:
             repo = AccountRepository(session)
             fresh = await repo.get(self.account_id)
@@ -88,13 +85,17 @@ class AccountWorker:
             self.account = fresh
             self.resume_id = fresh.resume_id
             self._apply_settings(fresh)
+            # обновляем include-настройки
+            self.cfg["include_junior"] = await get_include_junior()
+            self.cfg["include_senior"] = await get_include_senior()
             return bool(fresh.is_enabled)
 
     # ---------- Сон с проверками ----------
 
     async def _interruptible_sleep(self, seconds: float, watch_pause: bool = False):
+        if seconds >= 300:
+            self.log.info(f"💤 Сон {seconds / 60:.1f} мин (watch_pause={watch_pause})")
         end_time = asyncio.get_event_loop().time() + seconds
-        # ВАЖНО: init текущим временем, иначе проверка сработает мгновенно
         last_db_check = asyncio.get_event_loop().time()
         while not self.stop_event.is_set():
             remaining = end_time - asyncio.get_event_loop().time()
@@ -123,6 +124,43 @@ class AccountWorker:
 
             await asyncio.sleep(min(remaining, 10))
 
+    # ---------- Проверка и пересоздание браузерного контекста ----------
+
+    async def _check_browser_alive(self) -> bool:
+        try:
+            page = await asyncio.wait_for(self.context.new_page(), timeout=10)
+            await page.close()
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self.log.error(f"Browser context dead: {type(e).__name__}: {e}")
+            return False
+
+    async def _recreate_browser_context(self) -> bool:
+        self.log.warning("♻️ Пересоздаём browser context...")
+        try:
+            await asyncio.wait_for(self.context.close(), timeout=10)
+        except Exception as e:
+            self.log.warning(f"Не удалось закрыть старый контекст: {e}")
+
+        if self.browser_manager is None:
+            self.log.error("browser_manager не передан — рестарт не возможен")
+            return False
+
+        try:
+            cookies_file = Path(settings.COOKIES_DIR) / f"{self.account.tg_username}.txt"
+            proxy = build_proxy_dict(self.account)
+            self.context = await self.browser_manager.create_context(
+                cookies_source=str(cookies_file),
+                proxy=proxy,
+            )
+            self.log.info("♻️ Browser context пересоздан")
+            return True
+        except Exception as e:
+            self.log.error(f"Не удалось пересоздать контекст: {e}")
+            return False
+
     # ---------- Основной цикл ----------
 
     async def run(self):
@@ -136,7 +174,6 @@ class AccountWorker:
                 raise
             except Exception as e:
                 self.log.exception(f"unexpected error in iteration: {e}")
-                # Пауза перед следующей попыткой, чтобы не крутиться в цикле ошибок
                 try:
                     await self._interruptible_sleep(30, watch_pause=False)
                 except asyncio.CancelledError:
@@ -146,10 +183,9 @@ class AccountWorker:
         self.log.info("worker stopped")
 
     async def _run_iteration(self):
-        """Одна итерация основного цикла AccountWorker."""
         self._iterations += 1
 
-        # --- Hot-reload настроек из UI ---
+        # Hot-reload настроек из БД
         if self._iterations % 5 == 0:
             if not await self._reload_account():
                 self.log.info("Аккаунт отключён в UI (is_enabled=false), пауза 60 сек")
@@ -157,6 +193,16 @@ class AccountWorker:
                 return
 
         today = msk_now().date()
+
+        # ============================================================
+        # КОРОТКАЯ СЕССИЯ: читаем state и вытаскиваем примитивы
+        # ============================================================
+        daily_limit = 0
+        done_count = 0
+        state_status = None
+        state_pauses = []
+        state_manual_override = False
+        state_pause_until = None
 
         async with AsyncSessionLocal() as session:
             state_repo = AccountStateRepository(session)
@@ -181,94 +227,150 @@ class AccountWorker:
                     'manual_override': False,
                 }
                 await state_repo.create_or_update(self.account_id, today, data)
+                self.log.info(f"📅 Создан state на {today}: limit={limit}, pauses={len(pauses)}")
                 return
 
-            now = msk_now()
-            current_time = now.time()
+            daily_limit = state.daily_limit
+            done_count = state.done_count
+            state_status = state.status
+            state_pauses = list(state.pauses) if state.pauses else []
+            state_manual_override = bool(state.manual_override)
+            state_pause_until = state.pause_until
 
-            if state.done_count >= state.daily_limit:
-                self.log.info("Daily limit reached")
-                await state_repo.update_status(self.account_id, today, 'completed')
-                return
+        now = msk_now()
+        current_time = now.time()
 
-            # --- MANUAL OVERRIDE ---
-            if state.manual_override:
-                interval = random.uniform(34, 117)
-                self.log.debug(f"manual_override активен, ждём {interval:.1f}s")
-                await self._interruptible_sleep(interval, watch_pause=False)
-
-                if await get_setting('responses_enabled', 'true') != 'true':
-                    await self._interruptible_sleep(30, watch_pause=False)
-                    return
-
-                await self._do_response(session, state, today)
-                return
-
-            # --- ОБЫЧНЫЙ РЕЖИМ ---
-            if current_time < self.work_start:
-                sleep_seconds = (
-                        datetime.combine(now.date(), self.work_start).replace(tzinfo=MSK_TZ)
-                        - now
-                ).total_seconds()
-                await self._interruptible_sleep(sleep_seconds, watch_pause=True)
-                return
-
-            if current_time >= self.work_end or state.status == 'completed':
-                if state.status != 'completed':
-                    await state_repo.mark_completed(self.account_id, today)
-                tomorrow = now.date() + timedelta(days=1)
-                next_start = datetime.combine(tomorrow, self.work_start).replace(tzinfo=MSK_TZ)
-                sleep_seconds = (next_start - now).total_seconds()
-                await self._interruptible_sleep(sleep_seconds, watch_pause=True)
-                return
-
-            if state.status == 'paused' and state.pause_until:
-                now_naive = now.replace(tzinfo=None)
-                if state.pause_until > now_naive:
-                    sleep_seconds = (state.pause_until - now_naive).total_seconds()
-                    await self._interruptible_sleep(sleep_seconds, watch_pause=True)
-                    await state_repo.update_status(self.account_id, today, 'active', pause_until=None)
-                    return
-                else:
-                    await state_repo.update_status(self.account_id, today, 'active', pause_until=None)
-
-            pauses = state.pauses
-            in_pause, pause_end = self._check_pause(current_time, pauses)
-            if in_pause:
-                pause_end_dt = datetime.combine(now.date(), pause_end).replace(tzinfo=MSK_TZ)
-                sleep_seconds = (pause_end_dt - now).total_seconds()
-                if sleep_seconds <= 0:
-                    return
-                pause_until_naive = (now + timedelta(seconds=sleep_seconds)).replace(tzinfo=None)
-                await state_repo.update_status(
-                    self.account_id, today, 'paused', pause_until=pause_until_naive
+        # ============================================================
+        # Проверка дневного лимита (вне сессии)
+        # ============================================================
+        if done_count >= daily_limit:
+            self.log.info(f"✅ Daily limit reached ({done_count}/{daily_limit})")
+            async with AsyncSessionLocal() as s:
+                await AccountStateRepository(s).update_status(
+                    self.account_id, today, 'completed'
                 )
-                await self._interruptible_sleep(sleep_seconds, watch_pause=True)
-                await state_repo.update_status(self.account_id, today, 'active', pause_until=None)
-                return
+            return
 
-            next_pause_start = self._next_pause_start(current_time, pauses)
-            max_sleep = None
-            if next_pause_start:
-                next_start_dt = datetime.combine(now.date(), next_pause_start).replace(tzinfo=MSK_TZ)
-                seconds_to_pause = (next_start_dt - now).total_seconds()
-                max_sleep = max(0.0, seconds_to_pause - 60)
+        # ============================================================
+        # Общая проверка браузера (для обоих режимов)
+        # ============================================================
+        if self._iterations % 3 == 0:
+            if not await self._check_browser_alive():
+                ok = await self._recreate_browser_context()
+                if not ok:
+                    await self._interruptible_sleep(60, watch_pause=False)
+                    return
 
-            min_interval = 34
-            max_interval = 117
-            upper_bound = min(max_interval, max_sleep) if max_sleep is not None else max_interval
-            if upper_bound < min_interval:
-                upper_bound = min_interval
-
-            interval = random.uniform(min_interval, upper_bound)
-            self.log.info(f"Waiting {interval:.1f}s before next response")
+        # ============================================================
+        # MANUAL OVERRIDE: игнорируем расписание и паузы
+        # ============================================================
+        if state_manual_override:
+            interval = random.uniform(34, 117)
+            self.log.debug(f"manual_override активен, ждём {interval:.1f}s")
             await self._interruptible_sleep(interval, watch_pause=False)
 
             if await get_setting('responses_enabled', 'true') != 'true':
                 await self._interruptible_sleep(30, watch_pause=False)
                 return
 
-            await self._do_response(session, state, today)
+            await self._do_response(daily_limit, today)
+            return
+
+        # ============================================================
+        # ОБЫЧНЫЙ РЕЖИМ
+        # ============================================================
+
+        # --- До начала рабочего дня ---
+        if current_time < self.work_start:
+            sleep_seconds = (
+                    datetime.combine(now.date(), self.work_start).replace(tzinfo=MSK_TZ) - now
+            ).total_seconds()
+            self.log.info(
+                f"⏰ До начала рабочего дня {sleep_seconds / 60:.1f} мин "
+                f"(старт в {self.work_start.strftime('%H:%M')})"
+            )
+            await self._interruptible_sleep(sleep_seconds, watch_pause=True)
+            return
+
+        # --- После конца рабочего дня / завершено ---
+        if current_time >= self.work_end or state_status == 'completed':
+            if state_status != 'completed':
+                async with AsyncSessionLocal() as s:
+                    await AccountStateRepository(s).mark_completed(self.account_id, today)
+            tomorrow = now.date() + timedelta(days=1)
+            next_start = datetime.combine(tomorrow, self.work_start).replace(tzinfo=MSK_TZ)
+            sleep_seconds = (next_start - now).total_seconds()
+            self.log.info(
+                f"🌙 Конец рабочего дня. Следующий старт "
+                f"{next_start.strftime('%d.%m %H:%M')} ({sleep_seconds / 3600:.1f} ч)"
+            )
+            await self._interruptible_sleep(sleep_seconds, watch_pause=True)
+            return
+
+        # --- Пауза по pause_until ---
+        if state_status == 'paused' and state_pause_until:
+            now_naive = now.replace(tzinfo=None)
+            if state_pause_until > now_naive:
+                sleep_seconds = (state_pause_until - now_naive).total_seconds()
+                self.log.info(f"⏸️ Пауза до {state_pause_until} ({sleep_seconds / 60:.1f} мин)")
+                await self._interruptible_sleep(sleep_seconds, watch_pause=True)
+                async with AsyncSessionLocal() as s:
+                    await AccountStateRepository(s).update_status(
+                        self.account_id, today, 'active', pause_until=None
+                    )
+                return
+            else:
+                async with AsyncSessionLocal() as s:
+                    await AccountStateRepository(s).update_status(
+                        self.account_id, today, 'active', pause_until=None
+                    )
+
+        # --- Запланированные паузы из расписания ---
+        in_pause, pause_end = self._check_pause(current_time, state_pauses)
+        if in_pause:
+            pause_end_dt = datetime.combine(now.date(), pause_end).replace(tzinfo=MSK_TZ)
+            sleep_seconds = (pause_end_dt - now).total_seconds()
+            if sleep_seconds <= 0:
+                return
+            self.log.info(
+                f"☕ Запланированная пауза до {pause_end.strftime('%H:%M')} "
+                f"({sleep_seconds / 60:.1f} мин)"
+            )
+            pause_until_naive = (now + timedelta(seconds=sleep_seconds)).replace(tzinfo=None)
+            async with AsyncSessionLocal() as s:
+                await AccountStateRepository(s).update_status(
+                    self.account_id, today, 'paused', pause_until=pause_until_naive
+                )
+            await self._interruptible_sleep(sleep_seconds, watch_pause=True)
+            async with AsyncSessionLocal() as s:
+                await AccountStateRepository(s).update_status(
+                    self.account_id, today, 'active', pause_until=None
+                )
+            return
+
+        # --- Интервал до следующего отклика ---
+        next_pause_start = self._next_pause_start(current_time, state_pauses)
+        max_sleep = None
+        if next_pause_start:
+            next_start_dt = datetime.combine(now.date(), next_pause_start).replace(tzinfo=MSK_TZ)
+            seconds_to_pause = (next_start_dt - now).total_seconds()
+            max_sleep = max(0.0, seconds_to_pause - 60)
+
+        min_interval = 34
+        max_interval = 117
+        upper_bound = min(max_interval, max_sleep) if max_sleep is not None else max_interval
+        if upper_bound < min_interval:
+            upper_bound = min_interval
+
+        interval = random.uniform(min_interval, upper_bound)
+        self.log.info(f"Waiting {interval:.1f}s before next response")
+        await self._interruptible_sleep(interval, watch_pause=False)
+
+        if await get_setting('responses_enabled', 'true') != 'true':
+            await self._interruptible_sleep(30, watch_pause=False)
+            return
+
+        await self._do_response(daily_limit, today)
 
     def _check_pause(self, current_time: time, pauses: list) -> tuple[bool, Optional[time]]:
         for p in pauses:
@@ -282,16 +384,6 @@ class AccountWorker:
         starts = [datetime.strptime(p['start'], "%H:%M").time() for p in pauses]
         future_starts = [t for t in starts if t > current_time]
         return min(future_starts) if future_starts else None
-
-    async def _check_browser_alive(self):
-        """Раз в минуту проверяет, что браузер-контекст ещё жив."""
-        try:
-            page = await self.context.new_page()
-            await page.close()
-            return True
-        except Exception as e:
-            self.log.error(f"Browser context dead: {e}")
-            return False
 
     # ---------- Логирование откликов ----------
 
@@ -340,148 +432,194 @@ class AccountWorker:
 
     # ---------- Отклик ----------
 
-    async def _do_response(self, session: AsyncSession, state, today):
-        vacancy_repo = VacancyRepository(session)
-        error_repo = ResponseErrorRepository(session)
-        state_repo = AccountStateRepository(session)
+    async def _do_response(self, daily_limit: int, today):
+        """
+        Отклик на одну вакансию.
+        Использует короткие сессии: долгие операции (Playwright) — вне транзакций.
+        """
+        v_id = v_url = v_title = None
 
-        include_junior = await get_include_junior()
-        include_senior = await get_include_senior()
-        vacancy = await vacancy_repo.get_random_unresponded(
-            self.account_id,
-            include_junior,
-            include_senior,
-            skip_test_required_by_others=settings.SKIP_TEST_REQUIRED_BY_OTHERS,
-        )
+        # ============================================================
+        # ТРАНЗАКЦИЯ 1: выбрать вакансию и пометить pending
+        # ============================================================
+        async with AsyncSessionLocal() as s1:
+            vacancy_repo = VacancyRepository(s1)
 
-        if not vacancy:
-            self.consecutive_failures += 1
-            if self.consecutive_failures >= 5:
-                self.log.warning(
-                    f"no actual vacancies after {self.consecutive_failures} attempts"
+            # include_junior/senior — из self.cfg, не из БД каждый раз
+            vacancy = await vacancy_repo.get_random_unresponded(
+                self.account_id,
+                self.cfg.get("include_junior", True),
+                self.cfg.get("include_senior", True),
+                skip_test_required_by_others=settings.SKIP_TEST_REQUIRED_BY_OTHERS,
+            )
+
+            if vacancy is None:
+                # выходим из сессии до sleep
+                pass
+            else:
+                self.consecutive_failures = 0
+                v_id = vacancy.hh_id
+                v_url = vacancy.url
+                v_title = vacancy.title
+                # mark_responded — ВНУТРИ сессии
+                await vacancy_repo.mark_responded(
+                    self.account_id, v_id, status="pending", commit=True
                 )
-                await self._interruptible_sleep(3600, watch_pause=False)
+
+        if v_id is None:
+            self.consecutive_failures += 1
+            wait_min = 30 if self.consecutive_failures >= 5 else 10
+            self.log.warning(
+                f"🔍 Нет подходящих вакансий "
+                f"(attempt {self.consecutive_failures}/5), следующая попытка через {wait_min} мин"
+            )
+            if self.consecutive_failures >= 5:
+                await self._interruptible_sleep(1800, watch_pause=False)
                 self.consecutive_failures = 0
             else:
                 await self._interruptible_sleep(600, watch_pause=False)
             return
 
-        self.consecutive_failures = 0
-
-        await vacancy_repo.mark_responded(
-            self.account_id, vacancy.hh_id, status="pending", commit=False
-        )
-
+        # ============================================================
+        # БЕЗ ТРАНЗАКЦИИ: письмо + Playwright
+        # ============================================================
         tg = self.account.tg_username or settings.TG_USERNAME or ""
         if tg and not tg.startswith("@"):
             tg = f"@{tg}"
-        context = {"vacancy_name": vacancy.title, "tg_username": tg}
-
+        context = {"vacancy_name": v_title, "tg_username": tg}
         message = generate_message(self.template, context)
 
         try:
             response_status = await self.response_service.respond_to_vacancy(
-                vacancy.url, self.resume_id, message, self.context
+                v_url, self.resume_id, message, self.context
             )
         except Exception as e:
             self.log.exception("exception during response")
-            await error_repo.add(self.account_id, vacancy.hh_id, str(e), error_type='exception')
-            await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status="failed")
-            await self._log_response(vacancy.hh_id, vacancy.title, vacancy.url, 'failed', str(e))
+            async with AsyncSessionLocal() as s2:
+                await ResponseErrorRepository(s2).add(
+                    self.account_id, v_id, str(e), error_type='exception'
+                )
+                await VacancyRepository(s2).mark_responded(
+                    self.account_id, v_id, status="failed", commit=True
+                )
+            await self._log_response(v_id, v_title, v_url, 'failed', str(e))
             return
 
         if response_status != 'auth_required':
             self.auth_failures = 0
 
-        if response_status in ('success', 'wo_soprovod'):
-            await vacancy_repo.increment_used_count(vacancy.hh_id)
-            new_done = await state_repo.increment_done(self.account_id, today)
-            label = '✅ отклик с письмом' if response_status == 'success' else '⚠️ отклик без письма'
-            self.log.info(f"{label} на {vacancy.hh_id}, done {new_done}/{state.daily_limit}")
-            await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status=response_status)
-            await self._log_response(vacancy.hh_id, vacancy.title, vacancy.url, response_status)
-            return
+        # ============================================================
+        # ТРАНЗАКЦИЯ 2: записать результат
+        # ============================================================
+        async with AsyncSessionLocal() as s3:
+            vacancy_repo = VacancyRepository(s3)
+            error_repo = ResponseErrorRepository(s3)
+            state_repo = AccountStateRepository(s3)
 
-        if response_status == 'test_required':
-            self.log.info(f"вакансия {vacancy.hh_id} требует теста")
-            await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status="test_required")
-            await self._log_response(vacancy.hh_id, vacancy.title, vacancy.url,
-                                     'test_required', 'тест от работодателя')
-            return
-
-        if response_status == 'already_responded':
-            self.log.info(f"вакансия {vacancy.hh_id} уже откликнута ранее")
-            await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status="already_responded")
-            await self._log_response(vacancy.hh_id, vacancy.title, vacancy.url,
-                                     'already_responded', 'отклик уже был сделан ранее')
-            return
-
-        if response_status == 'other_country_skipped':
-            self.log.info(f"вакансия {vacancy.hh_id} в другой стране — пропускаем")
-            await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id,
-                                              status="other_country_skipped")
-            await self._log_response(vacancy.hh_id, vacancy.title, vacancy.url,
-                                     'other_country_skipped', 'вакансия в другой стране')
-            return
-
-        if response_status == 'vacancy_archived':
-            self.log.info(f"вакансия {vacancy.hh_id} в архиве — деактивируем")
-            await vacancy_repo.mark_responded(
-                self.account_id, vacancy.hh_id, status="vacancy_archived"
-            )
-            # Важно: деактивируем глобально, чтобы другие аккаунты не тратили на неё время
-            from sqlalchemy import update as sa_update
-            from app.db.models import Vacancy as V
-            async with AsyncSessionLocal() as s:
-                await s.execute(
-                    sa_update(V).where(V.hh_id == vacancy.hh_id).values(is_actual=False)
+            # --- success / wo_soprovod ---
+            if response_status in ('success', 'wo_soprovod'):
+                await vacancy_repo.increment_used_count(v_id)
+                new_done = await state_repo.increment_done(self.account_id, today)
+                await vacancy_repo.mark_responded(
+                    self.account_id, v_id, status=response_status, commit=True
                 )
-                await s.commit()
-            await self._log_response(
-                vacancy.hh_id, vacancy.title, vacancy.url,
-                'vacancy_archived', 'вакансия в архиве на hh.ru',
-            )
-            return
+                label = ('✅ отклик с письмом' if response_status == 'success'
+                         else '⚠️ отклик без письма')
+                self.log.info(f"{label} на {v_id}, done {new_done}/{daily_limit}")
+                await self._log_response(v_id, v_title, v_url, response_status)
+                return
 
-        if response_status == 'failed':
-            self.log.warning(f"❌ вакансия {vacancy.hh_id}: неудача при отклике")
-            await error_repo.add(
-                self.account_id, vacancy.hh_id,
-                "response_failed", error_type='response_failed',
-            )
-            await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status="failed")
-            await self._log_response(vacancy.hh_id, vacancy.title, vacancy.url, 'failed', '')
-            return
-
-        if response_status == 'auth_required':
-            self.log.warning(f"🔐 вакансия {vacancy.hh_id}: требуется авторизация на hh.ru")
-            await vacancy_repo.mark_responded(
-                self.account_id, vacancy.hh_id, status="auth_required"
-            )
-            await error_repo.add(
-                self.account_id, vacancy.hh_id,
-                "auth_required: cookies expired", error_type='auth',
-            )
-            await self._log_response(
-                vacancy.hh_id, vacancy.title, vacancy.url,
-                'auth_required', 'требуется авторизация hh.ru',
-            )
-            self.auth_failures += 1
-            if self.auth_failures >= 3:
-                self.log.error(
-                    "🔐 Cookies устарели — 3 подряд auth_required. "
-                    "Пауза 30 минут. Обновите cookies/peyego1one.txt и перезапустите воркер."
+            # --- test_required ---
+            if response_status == 'test_required':
+                await vacancy_repo.mark_responded(
+                    self.account_id, v_id, status="test_required", commit=True
                 )
-                self.auth_failures = 0
-                await self._interruptible_sleep(1800, watch_pause=False)
-            return
+                self.log.info(f"🧪 вакансия {v_id} требует теста")
+                await self._log_response(v_id, v_title, v_url, 'test_required',
+                                         'тест от работодателя')
+                return
 
-        await error_repo.add(self.account_id, vacancy.hh_id,
-                             f"Unknown response status: {response_status}",
-                             error_type='unknown')
-        await vacancy_repo.mark_responded(self.account_id, vacancy.hh_id, status="failed")
-        await self._log_response(vacancy.hh_id, vacancy.title, vacancy.url,
-                                 'failed', f'Unknown status: {response_status}')
+            # --- already_responded ---
+            if response_status == 'already_responded':
+                await vacancy_repo.mark_responded(
+                    self.account_id, v_id, status="already_responded", commit=True
+                )
+                self.log.info(f"♻️ вакансия {v_id} уже откликнута ранее")
+                await self._log_response(v_id, v_title, v_url, 'already_responded',
+                                         'отклик уже был сделан ранее')
+                return
+
+            # --- other_country_skipped ---
+            if response_status == 'other_country_skipped':
+                await vacancy_repo.mark_responded(
+                    self.account_id, v_id, status="other_country_skipped", commit=True
+                )
+                self.log.info(f"🌍 вакансия {v_id} в другой стране — пропускаем")
+                await self._log_response(v_id, v_title, v_url, 'other_country_skipped',
+                                         'вакансия в другой стране')
+                return
+
+            # --- vacancy_archived ---
+            if response_status == 'vacancy_archived':
+                await vacancy_repo.mark_responded(
+                    self.account_id, v_id, status="vacancy_archived", commit=True
+                )
+                from sqlalchemy import update as sa_update
+                from app.db.models import Vacancy as V
+                await s3.execute(
+                    sa_update(V).where(V.hh_id == v_id).values(is_actual=False)
+                )
+                await s3.commit()
+                self.log.info(f"📦 вакансия {v_id} в архиве — деактивируем")
+                await self._log_response(v_id, v_title, v_url, 'vacancy_archived',
+                                         'вакансия в архиве на hh.ru')
+                return
+
+            # --- failed ---
+            if response_status == 'failed':
+                await error_repo.add(
+                    self.account_id, v_id,
+                    "response_failed", error_type='response_failed',
+                )
+                await vacancy_repo.mark_responded(
+                    self.account_id, v_id, status="failed", commit=True
+                )
+                self.log.warning(f"❌ вакансия {v_id}: неудача при отклике")
+                await self._log_response(v_id, v_title, v_url, 'failed', '')
+                return
+
+            # --- auth_required ---
+            if response_status == 'auth_required':
+                await vacancy_repo.mark_responded(
+                    self.account_id, v_id, status="auth_required", commit=True
+                )
+                await error_repo.add(
+                    self.account_id, v_id,
+                    "auth_required: cookies expired", error_type='auth',
+                )
+                self.log.warning(f"🔐 вакансия {v_id}: требуется авторизация на hh.ru")
+                await self._log_response(v_id, v_title, v_url, 'auth_required',
+                                         'требуется авторизация hh.ru')
+                self.auth_failures += 1
+                if self.auth_failures >= 3:
+                    self.log.error(
+                        "🔐 Cookies устарели — 3 подряд auth_required. Пауза 30 минут."
+                    )
+                    self.auth_failures = 0
+                    await self._interruptible_sleep(1800, watch_pause=False)
+                return
+
+            # --- unknown ---
+            await error_repo.add(
+                self.account_id, v_id,
+                f"Unknown response status: {response_status}",
+                error_type='unknown',
+            )
+            await vacancy_repo.mark_responded(
+                self.account_id, v_id, status="failed", commit=True
+            )
+            await self._log_response(v_id, v_title, v_url, 'failed',
+                                     f'Unknown status: {response_status}')
 
     async def stop(self):
         self.stop_event.set()

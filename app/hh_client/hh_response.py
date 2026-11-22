@@ -462,7 +462,11 @@ class HHResponseService(IResponseService):
     async def respond_to_vacancy(
             self, vacancy_url: str, resume_id: str, message: str, context: BrowserContext
     ) -> str:
-        page = await context.new_page()
+        try:
+            page = await asyncio.wait_for(context.new_page(), timeout=15)
+        except asyncio.TimeoutError:
+            logger.error("❌ Таймаут context.new_page() — Chromium мёртв")
+            return 'failed'
         try:
             logger.info(f"➡️ Переход: {vacancy_url}")
             await page.goto(vacancy_url, wait_until="domcontentloaded", timeout=60000)
@@ -546,22 +550,22 @@ class HHResponseService(IResponseService):
                 await self._dump_page_debug(page, "test_modal")
                 return 'test_required'
 
-            # # --- Модалка «другая страна» ---
-            # logger.info("🔬 [diag] → _handle_other_country_modal")
-            # try:
-            #     country_result = await asyncio.wait_for(
-            #         self._handle_other_country_modal(page), timeout=15
-            #     )
-            # except asyncio.TimeoutError:
-            #     logger.error("⏱️ Таймаут 'другая страна' (>15s)")
-            #     await self._dump_page_debug(page, "timeout_country_modal")
-            #     return 'failed'
-            # logger.info(f"🔬 [diag] 'другая страна': {country_result}")
-            #
-            # if country_result == 'skipped':
-            #     return 'other_country_skipped'
-            # if country_result == 'proceed':
-            #     await asyncio.sleep(2)
+            # --- Модалка «другая страна» ---
+            logger.info("🔬 [diag] → _handle_other_country_modal")
+            try:
+                country_result = await asyncio.wait_for(
+                    self._handle_other_country_modal(page), timeout=15
+                )
+            except asyncio.TimeoutError:
+                logger.error("⏱️ Таймаут 'другая страна' (>15s)")
+                await self._dump_page_debug(page, "timeout_country_modal")
+                return 'failed'
+            logger.info(f"🔬 [diag] 'другая страна': {country_result}")
+
+            if country_result == 'skipped':
+                return 'other_country_skipped'
+            if country_result == 'proceed':
+                await asyncio.sleep(2)
 
             # --- Отклик без модалки → "Приложить письмо" ---
             logger.info("🔬 [diag] проверяем 'Приложить' после клика")

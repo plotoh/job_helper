@@ -4,16 +4,23 @@ import logging
 from typing import List, Dict
 from playwright.async_api import BrowserContext, TimeoutError as PlaywrightTimeoutError
 
-
 from app.hh_client.interfaces import IVacancyListParser
 
 logger = logging.getLogger(__name__)
 
 
 class HHVacancyListParser(IVacancyListParser):
-    async def fetch_ids(self, url: str, page: int, context: BrowserContext) -> List[Dict[str, str]]:
+    async def fetch_ids(self, url: str, page: int, context, order_by_publication: bool = False):
         vacancies = []
-        page_url = f"{url}&page={page}" if "?" in url else f"{url}?page={page}"
+        params = []
+        if "?" in url:
+            params.append(url)
+        else:
+            params.append(url + "?")
+        params.append(f"page={page}")
+        if order_by_publication:
+            params.append("order_by=publication_time")
+        page_url = "&".join(params)  # = f"{url}&page={page}" if "?" in url else f"{url}?page={page}"
         logger.info(f"Переход на страницу поиска: {page_url}")
         page_obj = await context.new_page()
         try:

@@ -29,12 +29,15 @@ class VacancyFilter(IVacancyFilter):
 
     EXCLUDE_PATTERNS = [
         # Другие языки
-        r'c\+\+', r'\bgo\b', r'\bphp\b', r'frontend', r'фронтенд', r'\bjava\b',
+        r'c\+\+', r'\bgo\b', r'golang', r'\bphp\b', r'frontend', r'фронтенд', r'\bjava\b',
         r'c#', r'full[\s-]?stack', r'фулстек', r'фул[\s-]?стек', r'1с', r'\b1c\b',
+        r'\bc\b', r'\bmcu\b',
         # QA / тестирование
-        r'\bqa\b', r'\baqa\b', r'quality[ -]?assurance', r'тестировщик',
-        r'тестирование', r'\btester\b', r'automation[ -]?qa', r'qa[ -]?automation',
-        r'qa[ -]?engineer', r'qa[ -]?инженер', r'qa[ -]?автоматизац',
+        r'\bqa\b', r'\baqa\b', r'\bsdet\b', r'quality[ -]?assurance',
+        r'тестировщик', r'тестирован\w*', r'\btester\b',
+        r'automation[ -]?qa', r'qa[ -]?automation', r'qa[ -]?engineer', r'qa[ -]?инженер',
+        r'qa[ -]?автоматизац', r'qa[ -]?lead', r'qa[ -]?manager', r'руководитель\s+qa',
+        r'автоматизац\w*\s+тестирован\w*',
         # DevOps / SRE
         r'\bdevops\b', r'девопс', r'\bsre\b', r'site[ -]?reliability',
         r'системный администратор', r'сисадмин', r'\bsysadmin\b',
@@ -44,10 +47,12 @@ class VacancyFilter(IVacancyFilter):
         r'bi[ -]?analyst', r'financial[ -]?analyst', r'системный аналитик',
         r'бизнес[ -]?аналитик', r'бизнес[ -]?analysis',
         r'product[ -]?analytics', r'продуктовый аналитик',
-        # Менеджмент / продакты
+        r'\bbi\b',
+        # Менеджмент
         r'product[ -]?manager', r'продакт', r'product[ -]?owner',
         r'\bпм\b', r'project[ -]?manager', r'проектный менеджер',
         r'менеджер продукта', r'руководитель продукта',
+        r'полного[\s-]?цикла', r'full[\s-]?cycle',
         # Продюсеры
         r'продюсер', r'\bproducer\b', r'creative[ -]?producer', r'креативный продюсер',
         # Безопасность
